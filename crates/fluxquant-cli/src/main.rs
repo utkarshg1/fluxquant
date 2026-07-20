@@ -23,7 +23,10 @@ use std::cmp::max;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tabled::Table;
+use tabled::builder::Builder;
 use tabled::settings::Style;
+use tabled::settings::Remove;
+use tabled::settings::object::Rows;
 
 use fluxquant::{GarchOrder, SimulationConfig, generate_dashboard, run_gbm_garch};
 
@@ -285,6 +288,7 @@ fn print_settings_box(
 
     let mut table = Table::new(rows);
     table.with(Style::modern_rounded());
+    table.with(Remove::row(Rows::first()));
     println!("{}", table.cyan().bold());
 }
 
@@ -565,6 +569,7 @@ async fn main() -> Result<()> {
 
             let mut table = Table::new(summary_rows);
             table.with(Style::modern());
+            table.with(Remove::row(Rows::first()));
             println!("{}", table);
             println!();
 
@@ -584,6 +589,7 @@ async fn main() -> Result<()> {
 
             let mut table = Table::new(risk_rows);
             table.with(Style::modern());
+            table.with(Remove::row(Rows::first()));
             println!("{}", table);
             println!();
 
@@ -592,40 +598,44 @@ async fn main() -> Result<()> {
             let vp = &res.summary.volatility_percentiles;
             let sp = &res.summary.sharpe_percentiles;
             let pp = &res.summary.price_percentiles;
-            let rp_str = format!(
-                "{:>7.2}%  {:>7.2}%  {:>7.2}%  {:>7.2}%  {:>7.2}%",
-                rp[0] * 100.0,
-                rp[1] * 100.0,
-                rp[2] * 100.0,
-                rp[3] * 100.0,
-                rp[4] * 100.0,
-            );
-            let vp_str = format!(
-                "{:>7.2}%  {:>7.2}%  {:>7.2}%  {:>7.2}%  {:>7.2}%",
-                vp[0] * 100.0,
-                vp[1] * 100.0,
-                vp[2] * 100.0,
-                vp[3] * 100.0,
-                vp[4] * 100.0,
-            );
-            let sp_str = format!(
-                "{:>8.3}  {:>8.3}  {:>8.3}  {:>8.3}  {:>8.3}",
-                sp[0], sp[1], sp[2], sp[3], sp[4],
-            );
-            let pp_str = format!(
-                "{:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}",
-                pp[0], pp[1], pp[2], pp[3], pp[4],
-            );
-            let pct_rows = vec![
-                ["Annual Return", rp_str.as_str()],
-                ["Annual Volatility", vp_str.as_str()],
-                ["Sharpe Ratio", sp_str.as_str()],
-                ["Terminal Price", pp_str.as_str()],
-            ];
 
-            let mut pct_table = Table::new(pct_rows);
+            let mut pct_builder = Builder::new();
+            pct_builder.push_record(["", "2.5%", "25%", "50%", "75%", "97.5%"]);
+            pct_builder.push_record([
+                "Annual Return",
+                &format!("{:>7.2}%", rp[0] * 100.0),
+                &format!("{:>7.2}%", rp[1] * 100.0),
+                &format!("{:>7.2}%", rp[2] * 100.0),
+                &format!("{:>7.2}%", rp[3] * 100.0),
+                &format!("{:>7.2}%", rp[4] * 100.0),
+            ]);
+            pct_builder.push_record([
+                "Annual Volatility",
+                &format!("{:>7.2}%", vp[0] * 100.0),
+                &format!("{:>7.2}%", vp[1] * 100.0),
+                &format!("{:>7.2}%", vp[2] * 100.0),
+                &format!("{:>7.2}%", vp[3] * 100.0),
+                &format!("{:>7.2}%", vp[4] * 100.0),
+            ]);
+            pct_builder.push_record([
+                "Sharpe Ratio",
+                &format!("{:>8.3}", sp[0]),
+                &format!("{:>8.3}", sp[1]),
+                &format!("{:>8.3}", sp[2]),
+                &format!("{:>8.3}", sp[3]),
+                &format!("{:>8.3}", sp[4]),
+            ]);
+            pct_builder.push_record([
+                "Terminal Price",
+                &format!("{:>8.2}", pp[0]),
+                &format!("{:>8.2}", pp[1]),
+                &format!("{:>8.2}", pp[2]),
+                &format!("{:>8.2}", pp[3]),
+                &format!("{:>8.2}", pp[4]),
+            ]);
+
+            let mut pct_table = pct_builder.build();
             pct_table.with(Style::modern());
-            println!("  2.5%      25%       50%       75%      97.5%");
             println!("{}", pct_table);
             println!();
 
@@ -660,6 +670,7 @@ async fn main() -> Result<()> {
 
             let mut table = Table::new(price_rows);
             table.with(Style::modern());
+            table.with(Remove::row(Rows::first()));
             println!("{}", table);
         }
     }

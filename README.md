@@ -39,7 +39,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.7.0"
+fluxquant = "1.8.0"
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1 --var-level 0.0
 fluxquant-cli run --config simulation.yaml
 ```
 
-The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in `tabled`-powered Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast), and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
+The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in clean `tabled`-powered Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast) with proper column headers and no index columns, and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
 
 ### Library
 
