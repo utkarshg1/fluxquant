@@ -110,9 +110,21 @@ fn setup() -> Result<FluxConfig> {
         .join("fluxquant-workspace");
     print!("Workspace [{}]: ", dw.display());
     let w = PathBuf::from(prompt(&dw.to_string_lossy())?);
+
+    print!("Default ticker [AAPL]: ");
+    let ticker = prompt("AAPL")?;
+
+    print!("Confidence level [0.95]: ");
+    let conf: f64 = prompt("0.95")?.parse().unwrap_or(0.95);
+
+    print!("Bootstrap paths [10000]: ");
+    let paths: usize = prompt("10000")?.parse().unwrap_or(10000);
+
     let cfg = FluxConfig {
         workspace: w,
-        ..Default::default()
+        default_ticker: ticker,
+        default_confidence: conf,
+        default_bootstrap_paths: paths,
     };
     for d in [
         &cfg.workspace.join("configs"),
@@ -199,6 +211,17 @@ enum Commands {
     },
     /// Interactive workspace setup wizard.
     Init,
+    /// Update default configuration values.
+    Config {
+        /// Default ticker symbol.
+        ticker: Option<String>,
+        /// Workspace directory path.
+        workspace: Option<PathBuf>,
+        /// Default confidence level.
+        confidence: Option<f64>,
+        /// Default bootstrap paths.
+        paths: Option<usize>,
+    },
 }
 
 fn print_corrected_cyan_banner() {
@@ -318,6 +341,95 @@ async fn main() -> Result<()> {
             }
             std::fs::write(&p, DEFAULT_TEMPLATE)?;
             println!("Template: {}", p.display());
+        }
+        Commands::Config {
+            ticker,
+            workspace,
+            confidence,
+            paths,
+        } => {
+            let mut cfg = load_flux().unwrap_or_default();
+            let has_flags = ticker.is_some()
+                || workspace.is_some()
+                || confidence.is_some()
+                || paths.is_some();
+
+            if has_flags {
+                if let Some(t) = ticker {
+                    cfg.default_ticker = t;
+                }
+                if let Some(w) = workspace {
+                    cfg.workspace = w;
+                }
+                if let Some(c) = confidence {
+                    cfg.default_confidence = c;
+                }
+                if let Some(p) = paths {
+                    cfg.default_bootstrap_paths = p;
+                }
+            } else {
+                println!("{}", "Current configuration:".cyan().bold());
+                println!();
+                print_settings_box(
+                    &cfg.default_ticker,
+                    5,
+                    3,
+                    cfg.default_confidence,
+                    cfg.default_bootstrap_paths,
+                    &GarchOrder::Auto { max_p: 3, max_q: 3 },
+                    0.05,
+                );
+                println!();
+
+                print!("Default ticker [{}]: ", cfg.default_ticker);
+                let input = prompt(&cfg.default_ticker)?;
+                if !input.trim().is_empty() {
+                    cfg.default_ticker = input.trim().to_string();
+                }
+
+                print!("Workspace [{}]: ", cfg.workspace.display());
+                let input = prompt(&cfg.workspace.to_string_lossy())?;
+                if !input.trim().is_empty() {
+                    cfg.workspace = PathBuf::from(input.trim());
+                }
+
+                print!("Confidence level [{}]: ", cfg.default_confidence);
+                let input = prompt(&cfg.default_confidence.to_string())?;
+                if let Ok(v) = input.parse::<f64>() {
+                    cfg.default_confidence = v;
+                }
+
+                print!("Bootstrap paths [{}]: ", cfg.default_bootstrap_paths);
+                let input = prompt(&cfg.default_bootstrap_paths.to_string())?;
+                if let Ok(v) = input.parse::<usize>() {
+                    cfg.default_bootstrap_paths = v;
+                }
+            }
+
+            println!();
+            println!("{}", "Updated configuration:".cyan().bold());
+            println!();
+            print_settings_box(
+                &cfg.default_ticker,
+                5,
+                3,
+                cfg.default_confidence,
+                cfg.default_bootstrap_paths,
+                &GarchOrder::Auto { max_p: 3, max_q: 3 },
+                0.05,
+            );
+
+            print!("Save? [Y/n]: ");
+            io::stdout().flush()?;
+            let mut confirm = String::new();
+            io::stdin().read_line(&mut confirm)?;
+            if confirm.trim().eq_ignore_ascii_case("n") {
+                println!("Cancelled.");
+                return Ok(());
+            }
+
+            save_flux(&cfg)?;
+            println!("Config saved to {}", flux_config_path().display());
         }
         Commands::Run {
             ticker,

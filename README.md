@@ -13,6 +13,7 @@ Fluxquant treats market data as a continuous, streaming flow — emphasizing spe
 - **Risk Analytics** — VaR, CVaR, Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation, terminal price percentiles
 - **Legacy API** — builder-pattern `SimulationEngine` for quick volatility fitting
 - **YAML Configuration** — declarative simulation configs with CLI template generation
+- **Config Management** — CLI subcommand to update defaults (ticker, confidence, bootstrap paths) interactively or via flags
 
 ## Architecture
 
@@ -39,7 +40,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.8.0"
+fluxquant = "1.9.0"
 ```
 
 ## Usage
@@ -61,9 +62,15 @@ fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1 --var-level 0.0
 
 # Use a YAML config file
 fluxquant-cli run --config simulation.yaml
+
+# Update default config interactively
+fluxquant-cli config
+
+# Quick update a single default
+fluxquant-cli config --ticker SPY
 ```
 
-The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in clean `tabled`-powered Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast) with proper column headers and no index columns, and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
+The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in clean `tabled`-powered Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast) with proper column headers and no index columns, and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually. Use `config` to manage default settings.
 
 ### Library
 
