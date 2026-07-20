@@ -141,6 +141,253 @@ fn prompt_input(default: &str) -> Result<String> {
     })
 }
 
+/// Display the resolved run configuration summary.
+fn show_run_config(
+    ticker: &str,
+    forecast_years: u32,
+    hist_years: u32,
+    conf_level: f64,
+    n_bootstrap: usize,
+    sarima: &str,
+    garch: &str,
+    output: &Path,
+) {
+    println!("\n{}", style("═".repeat(55)).dim());
+    println!("  {}", style("Simulation Configuration").cyan().bold());
+    println!("{}", style("═".repeat(55)).dim());
+
+    println!(
+        "  {:<20} {}",
+        style("Ticker:").dim(),
+        style(ticker).cyan().bold()
+    );
+    println!(
+        "  {:<20} {} {}",
+        style("Forecast:").dim(),
+        style(format!("{forecast_years} years")).cyan().bold(),
+        style(format!("({} weeks)", forecast_years * 52)).dim()
+    );
+    println!(
+        "  {:<20} {}",
+        style("History:").dim(),
+        style(format!("{hist_years} years")).cyan().bold()
+    );
+    println!(
+        "  {:<20} {}",
+        style("Confidence:").dim(),
+        style(format!("{}%", (conf_level * 100.0) as usize))
+            .cyan()
+            .bold()
+    );
+    println!(
+        "  {:<20} {}",
+        style("Bootstrap paths:").dim(),
+        style(format!("{n_bootstrap}")).cyan().bold()
+    );
+    println!(
+        "  {:<20} {}",
+        style("SARIMA:").dim(),
+        style(sarima).cyan().bold()
+    );
+    println!(
+        "  {:<20} {}",
+        style("GARCH:").dim(),
+        style(garch).cyan().bold()
+    );
+    println!(
+        "  {:<20} {}",
+        style("Output:").dim(),
+        style(output.display()).cyan().bold()
+    );
+    println!("{}", style("═".repeat(55)).dim());
+}
+
+/// Interactive parameter editor. Prompts user for each value with defaults.
+/// Returns (ticker, forecast_years, hist_years, conf_level, n_bootstrap, sarima_str, garch_str, output, sarima_order, garch_order).
+fn prompt_run_config(
+    ticker: &str,
+    forecast_years: u32,
+    hist_years: u32,
+    conf_level: f64,
+    n_bootstrap: usize,
+    sarima: &str,
+    garch: &str,
+    garch_max_p: usize,
+    garch_max_q: usize,
+    garch_p: Option<usize>,
+    garch_q: Option<usize>,
+    seasonal_period: usize,
+    output: &Path,
+) -> Result<(
+    String,
+    u32,
+    u32,
+    f64,
+    usize,
+    String,
+    String,
+    PathBuf,
+    SarimaOrder,
+    GarchOrder,
+)> {
+    println!(
+        "\n  {}",
+        style("Enter new values (press Enter to keep default):")
+            .cyan()
+            .bold()
+    );
+    println!();
+
+    print!("  {} [{}]: ", style("Ticker").bold(), style(ticker).dim());
+    let new_ticker = prompt_input(ticker)?.to_uppercase();
+
+    print!(
+        "  {} [{}]: ",
+        style("Forecast years").bold(),
+        style(forecast_years.to_string()).dim()
+    );
+    let new_years: u32 = prompt_input(&forecast_years.to_string())?
+        .parse()
+        .unwrap_or(forecast_years);
+
+    print!(
+        "  {} [{}]: ",
+        style("History years").bold(),
+        style(hist_years.to_string()).dim()
+    );
+    let new_hist: u32 = prompt_input(&hist_years.to_string())?
+        .parse()
+        .unwrap_or(hist_years);
+
+    print!(
+        "  {} [{}]: ",
+        style("Confidence").bold(),
+        style(conf_level.to_string()).dim()
+    );
+    let new_conf: f64 = prompt_input(&conf_level.to_string())?
+        .parse()
+        .unwrap_or(conf_level);
+
+    print!(
+        "  {} [{}]: ",
+        style("Bootstrap paths").bold(),
+        style(n_bootstrap.to_string()).dim()
+    );
+    let new_paths: usize = prompt_input(&n_bootstrap.to_string())?
+        .parse()
+        .unwrap_or(n_bootstrap);
+
+    print!(
+        "  {} [{}]: ",
+        style("SARIMA mode").bold(),
+        style(sarima).dim()
+    );
+    let new_sarima = prompt_input(sarima)?;
+
+    let new_sarima_period = if new_sarima == "manual" {
+        print!(
+            "  {} [{}]: ",
+            style("Seasonal period").bold(),
+            style(seasonal_period.to_string()).dim()
+        );
+        prompt_input(&seasonal_period.to_string())?
+            .parse()
+            .unwrap_or(seasonal_period)
+    } else {
+        seasonal_period
+    };
+
+    print!(
+        "  {} [{}]: ",
+        style("GARCH mode").bold(),
+        style(garch).dim()
+    );
+    let new_garch = prompt_input(garch)?;
+
+    let (_new_garch_order, new_garch_max_p, new_garch_max_q, new_garch_p, new_garch_q) =
+        if new_garch == "fixed" {
+            let p = garch_p.unwrap_or(1);
+            let q = garch_q.unwrap_or(1);
+            print!(
+                "  {} [{}]: ",
+                style("GARCH p").bold(),
+                style(p.to_string()).dim()
+            );
+            let fp: usize = prompt_input(&p.to_string())?.parse().unwrap_or(p);
+            print!(
+                "  {} [{}]: ",
+                style("GARCH q").bold(),
+                style(q.to_string()).dim()
+            );
+            let fq: usize = prompt_input(&q.to_string())?.parse().unwrap_or(q);
+            (Some((fp, fq)), garch_max_p, garch_max_q, Some(fp), Some(fq))
+        } else {
+            let mp = garch_max_p;
+            let mq = garch_max_q;
+            print!(
+                "  {} [{}]: ",
+                style("Max GARCH p").bold(),
+                style(mp.to_string()).dim()
+            );
+            let nmp: usize = prompt_input(&mp.to_string())?.parse().unwrap_or(mp);
+            print!(
+                "  {} [{}]: ",
+                style("Max GARCH q").bold(),
+                style(mq.to_string()).dim()
+            );
+            let nmq: usize = prompt_input(&mq.to_string())?.parse().unwrap_or(mq);
+            (None, nmp, nmq, None, None)
+        };
+
+    print!(
+        "  {} [{}]: ",
+        style("Output").bold(),
+        style(output.display()).dim()
+    );
+    let new_output_str = prompt_input(&output.to_string_lossy())?;
+    let new_output = PathBuf::from(&new_output_str);
+
+    // Build final orders
+    let sarima_order = match new_sarima.as_str() {
+        "manual" => SarimaOrder::Manual {
+            p: 1,
+            d: 1,
+            q: 1,
+            P: 1,
+            D: 1,
+            Q: 1,
+            s: new_sarima_period,
+        },
+        _ => SarimaOrder::Auto {
+            seasonal_period: new_sarima_period,
+        },
+    };
+
+    let garch_order = match new_garch.as_str() {
+        "fixed" => GarchOrder::Manual {
+            p: new_garch_p.unwrap_or(1),
+            q: new_garch_q.unwrap_or(1),
+        },
+        _ => GarchOrder::Auto {
+            max_p: new_garch_max_p,
+            max_q: new_garch_max_q,
+        },
+    };
+
+    Ok((
+        new_ticker,
+        new_years,
+        new_hist,
+        new_conf,
+        new_paths,
+        new_sarima,
+        new_garch,
+        new_output,
+        sarima_order,
+        garch_order,
+    ))
+}
+
 /// Interactive setup wizard — prompts user and returns a new FluxConfig.
 fn setup_wizard() -> Result<FluxConfig> {
     println!("\n{}", style("fluxquant first-time setup").cyan().bold());
@@ -198,7 +445,7 @@ fn setup_wizard() -> Result<FluxConfig> {
     println!(
         "\n  {} Setup complete! Run {} to start.\n",
         style("✓").green().bold(),
-        style("fluxquant run").cyan().bold()
+        style("fluxquant-cli run").cyan().bold()
     );
 
     Ok(cfg)
@@ -233,7 +480,7 @@ enum Commands {
         history_years: u32,
 
         /// Confidence level (e.g. 0.95 for 95%)
-        #[arg(short, long, default_value = "0.95")]
+        #[arg(long, default_value = "0.95")]
         confidence: f64,
 
         /// Number of bootstrap paths
@@ -445,6 +692,68 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // Resolve output path: CLI > workspace default
+            let output =
+                output.unwrap_or_else(|| flux_cfg.workspace.join("results").join("dashboard.html"));
+
+            // ── Interactive confirmation ─────────────────────────────────
+            show_run_config(
+                &ticker,
+                forecast_years,
+                hist_years,
+                conf_level,
+                n_bootstrap,
+                &sarima,
+                &garch,
+                &output,
+            );
+
+            print!("\n  {} ", style("Run with these settings? [Y/n]:").bold());
+            io::stdout().flush()?;
+            let confirm = prompt_input("Y")?;
+
+            let (
+                ticker,
+                forecast_years,
+                hist_years,
+                conf_level,
+                n_bootstrap,
+                _sarima,
+                _garch,
+                output,
+                sarima_order,
+                garch_order,
+            ) = if confirm.trim().eq_ignore_ascii_case("n") {
+                prompt_run_config(
+                    &ticker,
+                    forecast_years,
+                    hist_years,
+                    conf_level,
+                    n_bootstrap,
+                    &sarima,
+                    &garch,
+                    garch_max_p,
+                    garch_max_q,
+                    garch_p,
+                    garch_q,
+                    s_period,
+                    &output,
+                )?
+            } else {
+                (
+                    ticker,
+                    forecast_years,
+                    hist_years,
+                    conf_level,
+                    n_bootstrap,
+                    sarima,
+                    garch,
+                    output,
+                    sarima_order,
+                    garch_order,
+                )
+            };
+
             let config = SimulationConfig {
                 forecast_weeks: forecast_years as usize * 52,
                 confidence_level: conf_level,
@@ -453,10 +762,6 @@ async fn main() -> Result<()> {
                 n_bootstrap,
                 seed: Some(42),
             };
-
-            // Resolve output path: CLI > workspace default
-            let output =
-                output.unwrap_or_else(|| flux_cfg.workspace.join("results").join("dashboard.html"));
 
             // ── Fetch historical data via yfinance-rs ─────────────────────
             println!(
@@ -598,14 +903,13 @@ async fn main() -> Result<()> {
 
             println!("\n  {} Summary Statistics:", style("→").yellow());
             println!(
-                "    Mean Annual Return:  {}{}%{}",
+                "    Mean Annual Return:  {}{}%",
                 if result.summary.mean_annual_return >= 0.0 {
                     "+"
                 } else {
                     ""
                 },
-                style(format!("{:.2}", result.summary.mean_annual_return * 100.0)).green(),
-                ""
+                style(format!("{:.2}", result.summary.mean_annual_return * 100.0)).green()
             );
             println!(
                 "    Annual Volatility:   {}%",
@@ -616,8 +920,13 @@ async fn main() -> Result<()> {
                 style(format!("{:.3}", result.summary.sharpe_ratio)).cyan()
             );
             println!(
-                "    Max Drawdown:        {}%",
-                style(format!("{:.2}", result.summary.max_drawdown * 100.0)).red()
+                "    Max Drawdown:        {}%  {}",
+                style(format!("{:.2}", result.summary.max_drawdown * 100.0)).red(),
+                style("(worst case)").dim()
+            );
+            println!(
+                "    Median Drawdown:     {}%",
+                style(format!("{:.2}", result.summary.median_drawdown * 100.0)).red()
             );
             println!(
                 "    Skewness:            {}",
@@ -640,6 +949,55 @@ async fn main() -> Result<()> {
                 result.garch_order_selected.0, result.garch_order_selected.1
             );
             println!("    Bootstrap Paths:     {}", style(n_bootstrap).cyan());
+
+            // ── Distribution Percentiles ────────────────────────────────
+            let q_labels = [" 2.5%", "  25%", "  50%", "  75%", "97.5%"];
+            println!("\n  {} Distribution Percentiles:", style("→").yellow());
+            println!(
+                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
+                "Percentile:", q_labels[0], q_labels[1], q_labels[2], q_labels[3], q_labels[4]
+            );
+            println!(
+                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
+                "Annual Return",
+                format!("{:>+.2}%", result.summary.return_percentiles[0] * 100.0),
+                format!("{:>+.2}%", result.summary.return_percentiles[1] * 100.0),
+                format!("{:>+.2}%", result.summary.return_percentiles[2] * 100.0),
+                format!("{:>+.2}%", result.summary.return_percentiles[3] * 100.0),
+                format!("{:>+.2}%", result.summary.return_percentiles[4] * 100.0),
+            );
+            println!(
+                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
+                "Annual Vol",
+                format!("{:>6.2}%", result.summary.volatility_percentiles[0] * 100.0),
+                format!("{:>6.2}%", result.summary.volatility_percentiles[1] * 100.0),
+                format!("{:>6.2}%", result.summary.volatility_percentiles[2] * 100.0),
+                format!("{:>6.2}%", result.summary.volatility_percentiles[3] * 100.0),
+                format!("{:>6.2}%", result.summary.volatility_percentiles[4] * 100.0),
+            );
+            println!(
+                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
+                "Sharpe Ratio",
+                format!("{:>7.3}", result.summary.sharpe_percentiles[0]),
+                format!("{:>7.3}", result.summary.sharpe_percentiles[1]),
+                format!("{:>7.3}", result.summary.sharpe_percentiles[2]),
+                format!("{:>7.3}", result.summary.sharpe_percentiles[3]),
+                format!("{:>7.3}", result.summary.sharpe_percentiles[4]),
+            );
+
+            // ── SARIMA (0,0,0) info message ────────────────────────────
+            if result.sarima_order_selected.contains("(0,0,0)") {
+                println!(
+                    "\n  {} {}",
+                    style("!").yellow().bold(),
+                    style("SARIMA selected (0,0,0)(0,0,0) — no autocorrelation found in returns.")
+                        .dim()
+                );
+                println!(
+                    "    {}",
+                    style("This is normal for stock returns. GARCH still models volatility clustering.").dim()
+                );
+            }
 
             // ── Generate HTML Dashboard ───────────────────────────────────
             let html = generate_dashboard(&ticker, &result, &closing_prices)?;

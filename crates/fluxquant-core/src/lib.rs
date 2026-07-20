@@ -131,14 +131,22 @@ pub struct SummaryStats {
     pub annual_volatility: f64,
     /// Sharpe ratio (assuming 0 risk-free rate).
     pub sharpe_ratio: f64,
-    /// Maximum drawdown from peak.
+    /// Worst-case max drawdown across all bootstrap paths (negative convention).
     pub max_drawdown: f64,
+    /// Median max drawdown across bootstrap paths (negative convention).
+    pub median_drawdown: f64,
     /// Return distribution skewness.
     pub skewness: f64,
     /// Return distribution excess kurtosis.
     pub kurtosis: f64,
     /// Estimated t-distribution degrees of freedom.
     pub t_df_estimate: f64,
+    /// Annual return percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
+    pub return_percentiles: [f64; 5],
+    /// Annual volatility percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
+    pub volatility_percentiles: [f64; 5],
+    /// Sharpe ratio percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
+    pub sharpe_percentiles: [f64; 5],
 }
 
 /// Full result of a SARIMA-GARCH simulation.
@@ -384,8 +392,15 @@ pub fn run_sarima_garch(
 
             // ── Step 4: Parallel bootstrap ────────────────────────────────
             let mean_return = weekly_returns.iter().sum::<f64>() / weekly_returns.len() as f64;
+            let res_std =
+                (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt();
+            let standardized_residuals: Vec<f64> = if res_std > 0.0 {
+                residuals.iter().map(|&r| r / res_std).collect()
+            } else {
+                residuals.to_vec()
+            };
             let bootstrap_paths = run_parallel_bootstrap(
-                residuals,
+                &standardized_residuals,
                 mean_return,
                 &volatility_forecast.point,
                 config.forecast_weeks,
@@ -495,8 +510,15 @@ pub fn run_sarima_garch(
             };
 
             let mean_return = weekly_returns.iter().sum::<f64>() / weekly_returns.len() as f64;
+            let res_std =
+                (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt();
+            let standardized_residuals: Vec<f64> = if res_std > 0.0 {
+                residuals.iter().map(|&r| r / res_std).collect()
+            } else {
+                residuals.to_vec()
+            };
             let bootstrap_paths = run_parallel_bootstrap(
-                residuals,
+                &standardized_residuals,
                 mean_return,
                 &volatility_forecast.point,
                 config.forecast_weeks,
@@ -568,9 +590,31 @@ fn run_parallel_bootstrap(
 
 // ─── Summary Statistics ───────────────────────────────────────────────────────
 
+/// Compute quantile values from a dataset.
+/// `quantiles` should be in [0.0, 1.0] range.
+fn compute_percentiles(sorted_data: &mut [f64], quantiles: &[f64]) -> Vec<f64> {
+    sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted_data.len();
+    quantiles
+        .iter()
+        .map(|&q| {
+            let pos = q * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            if lo == hi {
+                sorted_data[lo]
+            } else {
+                let frac = pos - lo as f64;
+                sorted_data[lo] * (1.0 - frac) + sorted_data[hi] * frac
+            }
+        })
+        .collect()
+}
+
 /// Compute summary statistics from bootstrap paths and historical returns.
-fn compute_summary(paths: &[Vec<f64>], historical_returns: &[f64]) -> SummaryStats {
+fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummaryStats {
     let n = paths.len() as f64;
+    let quantiles = [0.025, 0.25, 0.50, 0.75, 0.975];
 
     // Terminal returns across paths
     let terminal_returns: Vec<f64> = paths
@@ -588,8 +632,12 @@ fn compute_summary(paths: &[Vec<f64>], historical_returns: &[f64]) -> SummarySta
     let std = variance.sqrt();
 
     // Annualize (assuming weekly data, ~52 weeks/year)
-    let mean_annual_return = mean * 52.0 / paths.first().map(|p| p.len() as f64).unwrap_or(52.0);
-    let annual_volatility = std * (52.0_f64).sqrt();
+    // `mean` and `std` are computed from terminal log-returns over the full forecast period,
+    // so we annualize by dividing by forecast years (= forecast_weeks/52).
+    let forecast_weeks = paths.first().map(|p| p.len() - 1).unwrap_or(52) as f64;
+    let forecast_years = forecast_weeks / 52.0;
+    let mean_annual_return = mean / forecast_years;
+    let annual_volatility = std / forecast_years.sqrt();
 
     let sharpe_ratio = if annual_volatility > 0.0 {
         mean_annual_return / annual_volatility
@@ -597,14 +645,47 @@ fn compute_summary(paths: &[Vec<f64>], historical_returns: &[f64]) -> SummarySta
         0.0
     };
 
-    // Max drawdown from the mean path
-    let mean_path: Vec<f64> = {
-        let n_steps = paths.first().map(|p| p.len()).unwrap_or(1);
-        (0..n_steps)
-            .map(|t| paths.iter().filter_map(|p| p.get(t)).sum::<f64>() / n)
-            .collect()
-    };
-    let max_drawdown = compute_max_drawdown(&mean_path);
+    // Max drawdown: worst across all bootstrap paths
+    let drawdowns: Vec<f64> = paths.iter().map(|p| compute_max_drawdown(p)).collect();
+    let max_drawdown = drawdowns.iter().cloned().fold(0.0f64, f64::min);
+    let mut sorted_dd = drawdowns.clone();
+    let median_drawdown = compute_percentiles(&mut sorted_dd, &[0.50])[0];
+
+    // Per-path annualized returns, volatilities, and Sharpe ratios
+    let annualization_factor = 52.0 / forecast_weeks;
+
+    let path_annual_returns: Vec<f64> = paths
+        .iter()
+        .filter_map(|p| p.last().map(|&end| end.ln() * annualization_factor))
+        .collect();
+
+    let path_annual_vols: Vec<f64> = paths
+        .iter()
+        .map(|p| {
+            let rets: Vec<f64> = p.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
+            let m = rets.iter().sum::<f64>() / rets.len() as f64;
+            let v = rets.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (rets.len() - 1) as f64;
+            v.sqrt() * (52.0_f64).sqrt()
+        })
+        .collect();
+
+    let path_sharpes: Vec<f64> = path_annual_returns
+        .iter()
+        .zip(path_annual_vols.iter())
+        .map(|(&r, &v)| if v > 0.0 { r / v } else { 0.0 })
+        .collect();
+
+    let return_percentiles: [f64; 5] =
+        compute_percentiles(&mut path_annual_returns.clone(), &quantiles)
+            .try_into()
+            .unwrap_or([0.0; 5]);
+    let volatility_percentiles: [f64; 5] =
+        compute_percentiles(&mut path_annual_vols.clone(), &quantiles)
+            .try_into()
+            .unwrap_or([0.0; 5]);
+    let sharpe_percentiles: [f64; 5] = compute_percentiles(&mut path_sharpes.clone(), &quantiles)
+        .try_into()
+        .unwrap_or([0.0; 5]);
 
     // Skewness and kurtosis of terminal returns
     let skewness = if std > 0.0 {
@@ -630,31 +711,24 @@ fn compute_summary(paths: &[Vec<f64>], historical_returns: &[f64]) -> SummarySta
     };
 
     // Estimate t-distribution degrees of freedom from kurtosis
-    // For t-distribution: kurtosis = 6/(df-4) for df > 4
-    // => df = 6/kurtosis + 4
     let t_df_estimate = if kurtosis > 0.1 {
         (6.0 / kurtosis) + 4.0
     } else {
         30.0 // effectively normal
     };
 
-    // Also compute from historical returns
-    let hist_mean = historical_returns.iter().sum::<f64>() / historical_returns.len() as f64;
-    let hist_var = historical_returns
-        .iter()
-        .map(|r| (r - hist_mean).powi(2))
-        .sum::<f64>()
-        / (historical_returns.len() - 1) as f64;
-    let _hist_std = hist_var.sqrt();
-
     SummaryStats {
         mean_annual_return,
         annual_volatility,
         sharpe_ratio,
         max_drawdown,
+        median_drawdown,
         skewness,
         kurtosis,
         t_df_estimate,
+        return_percentiles,
+        volatility_percentiles,
+        sharpe_percentiles,
     }
 }
 
@@ -866,13 +940,23 @@ pub fn generate_dashboard(
       <tr><td>Mean Annual Return</td><td class="value {ret_cls}">{ret_pct}%</td></tr>
       <tr><td>Annual Volatility</td><td class="value neutral">{vol_pct}%</td></tr>
       <tr><td>Sharpe Ratio</td><td class="value {sharpe_cls}">{sharpe}</td></tr>
-      <tr><td>Max Drawdown</td><td class="value negative">{dd_pct}%</td></tr>
+      <tr><td>Max Drawdown (worst)</td><td class="value negative">{dd_pct}%</td></tr>
+      <tr><td>Median Drawdown</td><td class="value negative">{md_pct}%</td></tr>
       <tr><td>Skewness</td><td class="value {skew_cls}">{skew}</td></tr>
       <tr><td>Excess Kurtosis</td><td class="value {kurt_cls}">{kurt}</td></tr>
       <tr><td>t-df Estimate</td><td class="value">{t_df}</td></tr>
       <tr><td>SARIMA Order</td><td class="value">{sarima_order}</td></tr>
       <tr><td>GARCH Order</td><td class="value">({gp},{gq})</td></tr>
       <tr><td>Bootstrap Paths</td><td class="value">{n_paths}</td></tr>
+    </table>
+  </div>
+  <div class="card full-width">
+    <h3>Distribution Percentiles</h3>
+    <table>
+      <tr><th>Percentile</th><th>2.5%</th><th>25%</th><th>50%</th><th>75%</th><th>97.5%</th></tr>
+      <tr><td>Annual Return</td><td>{rp0}%</td><td>{rp1}%</td><td>{rp2}%</td><td>{rp3}%</td><td>{rp4}%</td></tr>
+      <tr><td>Annual Volatility</td><td>{vp0}%</td><td>{vp1}%</td><td>{vp2}%</td><td>{vp3}%</td><td>{vp4}%</td></tr>
+      <tr><td>Sharpe Ratio</td><td>{sp0}</td><td>{sp1}</td><td>{sp2}</td><td>{sp3}</td><td>{sp4}</td></tr>
     </table>
   </div>
 </div>
@@ -1000,9 +1084,25 @@ new Chart(document.getElementById('histChart'), {{
         vol_pct = format!("{:.2}", result.summary.annual_volatility * 100.0),
         sharpe = format!("{:.3}", result.summary.sharpe_ratio),
         dd_pct = format!("{:.2}", result.summary.max_drawdown * 100.0),
+        md_pct = format!("{:.2}", result.summary.median_drawdown * 100.0),
         skew = format!("{:.4}", result.summary.skewness),
         kurt = format!("{:.4}", result.summary.kurtosis),
         t_df = format!("{:.2}", result.summary.t_df_estimate),
+        rp0 = format!("{:.2}", result.summary.return_percentiles[0] * 100.0),
+        rp1 = format!("{:.2}", result.summary.return_percentiles[1] * 100.0),
+        rp2 = format!("{:.2}", result.summary.return_percentiles[2] * 100.0),
+        rp3 = format!("{:.2}", result.summary.return_percentiles[3] * 100.0),
+        rp4 = format!("{:.2}", result.summary.return_percentiles[4] * 100.0),
+        vp0 = format!("{:.2}", result.summary.volatility_percentiles[0] * 100.0),
+        vp1 = format!("{:.2}", result.summary.volatility_percentiles[1] * 100.0),
+        vp2 = format!("{:.2}", result.summary.volatility_percentiles[2] * 100.0),
+        vp3 = format!("{:.2}", result.summary.volatility_percentiles[3] * 100.0),
+        vp4 = format!("{:.2}", result.summary.volatility_percentiles[4] * 100.0),
+        sp0 = format!("{:.3}", result.summary.sharpe_percentiles[0]),
+        sp1 = format!("{:.3}", result.summary.sharpe_percentiles[1]),
+        sp2 = format!("{:.3}", result.summary.sharpe_percentiles[2]),
+        sp3 = format!("{:.3}", result.summary.sharpe_percentiles[3]),
+        sp4 = format!("{:.3}", result.summary.sharpe_percentiles[4]),
         ret_cls = if result.summary.mean_annual_return >= 0.0 {
             "positive"
         } else {
@@ -1327,9 +1427,13 @@ mod tests {
                 annual_volatility: 0.18,
                 sharpe_ratio: 0.44,
                 max_drawdown: -0.12,
+                median_drawdown: -0.06,
                 skewness: -0.3,
                 kurtosis: 0.5,
                 t_df_estimate: 16.0,
+                return_percentiles: [-0.15, -0.02, 0.06, 0.12, 0.29],
+                volatility_percentiles: [0.10, 0.14, 0.17, 0.21, 0.28],
+                sharpe_percentiles: [-0.3, 0.1, 0.4, 0.7, 1.2],
             },
             garch_order_selected: (1, 1),
             sarima_order_selected: "(1,1,1)(1,1,1)[52]".into(),

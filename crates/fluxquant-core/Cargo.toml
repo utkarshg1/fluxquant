@@ -1,12 +1,14 @@
 [package]
 name = "fluxquant"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2024"
 authors = ["Utkarsh Gaikwad"]
 description = "High-performance quantitative finance and volatility modeling engine"
 license-file = "../../LICENSE"
 repository = "https://github.com/utkarshgaikwad/fluxquant"
 readme = "README.md"
+keywords = ["finance", "quantitative", "sarima", "garch", "volatility"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 ndarray = { version = "0.16", features = ["rayon"] }

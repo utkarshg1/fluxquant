@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "fluxquant"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "anofox-forecast",
  "chrono",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "fluxquant-cli"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
