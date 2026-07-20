@@ -142,7 +142,7 @@ pub struct SummaryStats {
     pub volatility_percentiles: [f64; 5],
     /// Sharpe ratio percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
     pub sharpe_percentiles: [f64; 5],
-    /// Terminal price percentiles (actual $): [2.5%, 25%, 50%, 75%, 97.5%]
+    /// Terminal price percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
     pub price_percentiles: [f64; 5],
 }
 
@@ -173,6 +173,12 @@ pub struct SimulationResult {
     pub last_price: f64,
     /// Confidence level used for intervals.
     pub confidence_level: f64,
+    /// Fan chart price percentiles at each time step.
+    pub fan_p2_5: Vec<f64>,
+    pub fan_p25: Vec<f64>,
+    pub fan_p50: Vec<f64>,
+    pub fan_p75: Vec<f64>,
+    pub fan_p97_5: Vec<f64>,
 }
 
 // ─── GARCH Optimization ───────────────────────────────────────────────────────
@@ -398,6 +404,9 @@ pub fn run_gbm_garch(
     let mut summary = summary;
     summary.price_percentiles = summary.price_percentiles.map(|p| p * last_price);
 
+    // Compute fan chart percentiles at actual dollar prices
+    let fan_quantiles = compute_fan_percentiles(&bootstrap_paths);
+
     Ok(SimulationResult {
         price_median,
         price_lower,
@@ -411,6 +420,11 @@ pub fn run_gbm_garch(
         mu_drift,
         last_price,
         confidence_level: config.confidence_level,
+        fan_p2_5: fan_quantiles[0].clone(),
+        fan_p25: fan_quantiles[1].clone(),
+        fan_p50: fan_quantiles[2].clone(),
+        fan_p75: fan_quantiles[3].clone(),
+        fan_p97_5: fan_quantiles[4].clone(),
     })
 }
 
@@ -485,6 +499,24 @@ fn compute_price_percentiles(
     }
 
     (med, low, high)
+}
+
+/// Compute fan chart percentiles [2.5%, 25%, 50%, 75%, 97.5%] at each time step.
+fn compute_fan_percentiles(paths: &[Vec<f64>]) -> [Vec<f64>; 5] {
+    if paths.is_empty() || paths[0].is_empty() {
+        return [vec![], vec![], vec![], vec![], vec![]];
+    }
+    let n_steps = paths[0].len();
+    let quantiles = [0.025, 0.25, 0.50, 0.75, 0.975];
+    let mut result: [Vec<f64>; 5] = [vec![], vec![], vec![], vec![], vec![]];
+    for step in 0..n_steps {
+        let mut vals: Vec<f64> = paths.iter().map(|p| p[step]).collect();
+        let p = compute_percentiles(&mut vals, &quantiles);
+        for (i, &v) in p.iter().enumerate() {
+            result[i].push(v);
+        }
+    }
+    result
 }
 
 // ─── Summary Statistics ───────────────────────────────────────────────────────
@@ -698,15 +730,6 @@ pub fn generate_dashboard(
     let n = result.price_median.len();
     let forecast_labels: Vec<String> = (1..=n).map(|w| format!("W{w}")).collect();
 
-    // Sample bootstrap paths for fan chart (max 50 paths)
-    let sample_size = result.bootstrap_paths.len().min(50);
-    let step = if result.bootstrap_paths.len() > sample_size {
-        result.bootstrap_paths.len() / sample_size
-    } else {
-        1
-    };
-    let sampled_paths: Vec<&Vec<f64>> = result.bootstrap_paths.iter().step_by(step).collect();
-
     // Terminal prices for histogram
     let terminal_prices: Vec<f64> = result
         .bootstrap_paths
@@ -785,7 +808,7 @@ pub fn generate_dashboard(
         .summary
         .price_percentiles
         .iter()
-        .map(|v| format!("${:.2}", v))
+        .map(|v| format!("{:.2}", v))
         .collect();
 
     let forecast_labels_json = serde_json_vec_str(&forecast_labels);
@@ -797,7 +820,11 @@ pub fn generate_dashboard(
     let vol_point_json = serde_json_vec_f64(&result.vol_forecast);
     let vol_lower_json = serde_json_vec_f64(&result.vol_lower);
     let vol_upper_json = serde_json_vec_f64(&result.vol_upper);
-    let sampled_paths_json = serde_json_sampled_paths(&sampled_paths);
+    let fan_p2_5_json = serde_json_vec_f64(&result.fan_p2_5);
+    let fan_p25_json = serde_json_vec_f64(&result.fan_p25);
+    let fan_p50_json = serde_json_vec_f64(&result.fan_p50);
+    let fan_p75_json = serde_json_vec_f64(&result.fan_p75);
+    let fan_p97_5_json = serde_json_vec_f64(&result.fan_p97_5);
     let hist_prices_json = serde_json_vec_f64(&terminal_prices);
     let hist_bins_json = serde_json_histogram(&hist_bins);
     let historical_prices_json = serde_json_vec_f64(historical_prices);
@@ -988,7 +1015,11 @@ const DATA = {{
   volPoint: {vol_point_json},
   volLower: {vol_lower_json},
   volUpper: {vol_upper_json},
-  sampledPaths: {sampled_paths_json},
+  fanP2_5: {fan_p2_5_json},
+  fanP25: {fan_p25_json},
+  fanP50: {fan_p50_json},
+  fanP75: {fan_p75_json},
+  fanP97_5: {fan_p97_5_json},
   histPrices: {hist_prices_json},
   histBins: {hist_bins_json},
   historicalPrices: {historical_prices_json},
@@ -1043,21 +1074,24 @@ new Chart(document.getElementById('volChart'), {{
   options: baseOpts()
 }});
 
-// ── Fan Chart ──
-const fanDatasets = DATA.sampledPaths.map((path, i) => ({{
-  data: path,
-  borderColor: `rgba(0,212,170,${{0.05 + 0.02 * (i % 10)}})`,
-  borderWidth: 1,
-  pointRadius: 0,
-  tension: 0.3
-}}));
+// ── Fan Chart (Percentile Bands) ──
 new Chart(document.getElementById('fanChart'), {{
   type: 'line',
   data: {{
     labels: DATA.forecastLabels,
-    datasets: fanDatasets
+    datasets: [
+      {{ label: '97.5%', data: DATA.fanP97_5, borderColor: '#ff6b6b', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: '75%', data: DATA.fanP75, borderColor: '#ffa502', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: 'Median', data: DATA.fanP50, borderColor: '#00d4aa', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: '25%', data: DATA.fanP25, borderColor: '#ffa502', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: '2.5%', data: DATA.fanP2_5, borderColor: '#ff6b6b', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: '97.5%–75%', data: DATA.fanP97_5, borderColor: 'transparent', backgroundColor: 'rgba(255,107,107,0.08)', fill: '+1', pointRadius: 0 }},
+      {{ label: '75%–Median', data: DATA.fanP75, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.12)', fill: '+1', pointRadius: 0 }},
+      {{ label: 'Median–25%', data: DATA.fanP50, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.12)', fill: '+1', pointRadius: 0 }},
+      {{ label: '25%–2.5%', data: DATA.fanP25, borderColor: 'transparent', backgroundColor: 'rgba(255,107,107,0.08)', fill: '+1', pointRadius: 0 }}
+    ]
   }},
-  options: {{ ...baseOpts(), plugins: {{ ...baseOpts().plugins, legend: {{ display: false }} }} }}
+  options: {{ ...baseOpts(), plugins: {{ ...baseOpts().plugins, legend: {{ display: true, labels: {{ color: '#aaa', boxWidth: 12, font: {{ size: 11 }} }} }} }} }}
 }});
 
 // ── Histogram ──
@@ -1137,7 +1171,11 @@ new Chart(document.getElementById('histChart'), {{
         vol_point_json = vol_point_json,
         vol_lower_json = vol_lower_json,
         vol_upper_json = vol_upper_json,
-        sampled_paths_json = sampled_paths_json,
+        fan_p2_5_json = fan_p2_5_json,
+        fan_p25_json = fan_p25_json,
+        fan_p50_json = fan_p50_json,
+        fan_p75_json = fan_p75_json,
+        fan_p97_5_json = fan_p97_5_json,
         hist_prices_json = hist_prices_json,
         hist_bins_json = hist_bins_json,
         historical_prices_json = historical_prices_json,
@@ -1190,11 +1228,6 @@ fn serde_json_vec_f64(v: &[f64]) -> String {
 
 fn serde_json_vec_str(v: &[String]) -> String {
     let inner: Vec<String> = v.iter().map(|s| format!("\"{s}\"")).collect();
-    format!("[{}]", inner.join(","))
-}
-
-fn serde_json_sampled_paths(paths: &[&Vec<f64>]) -> String {
-    let inner: Vec<String> = paths.iter().map(|p| serde_json_vec_f64(p)).collect();
     format!("[{}]", inner.join(","))
 }
 
@@ -1473,6 +1506,11 @@ mod tests {
             mu_drift: 0.001,
             last_price: 100.0,
             confidence_level: 0.95,
+            fan_p2_5: vec![98.0, 97.0, 96.0],
+            fan_p25: vec![99.0, 99.5, 100.0],
+            fan_p50: vec![100.0, 101.0, 102.0],
+            fan_p75: vec![101.0, 102.5, 104.0],
+            fan_p97_5: vec![102.0, 104.0, 106.0],
         };
         let html = generate_dashboard("AAPL", &result, &[100.0, 101.0, 102.0]).unwrap();
         assert!(html.contains("AAPL"));

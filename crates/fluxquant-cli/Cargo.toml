@@ -1,6 +1,6 @@
 [package]
 name = "fluxquant-cli"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 authors = ["Utkarsh Gaikwad"]
 description = "Command-line interface for the fluxquant quantitative finance engine"
@@ -20,3 +20,4 @@ yfinance-rs = "0.9.1"
 tokio = { version = "1", features = ["full"] }
 dirs = "6"
 owo-colors = "4.0"
+tabled = "0.21"

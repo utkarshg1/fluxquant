@@ -9,7 +9,7 @@ Fluxquant treats market data as a continuous, streaming flow — emphasizing spe
 - **GBM-GARCH Pipeline** — Geometric Brownian Motion with GARCH(p,q) volatility forecasting
 - **Auto GARCH Order Selection** — grid search over `(p,q)` combinations optimized by BIC
 - **Parallel Bootstrap** — rayon-powered Monte Carlo path simulation
-- **Interactive HTML Dashboard** — self-contained output with Chart.js visualizations
+- **Interactive HTML Dashboard** — self-contained output with Chart.js visualizations and percentile fan chart
 - **Risk Analytics** — VaR, CVaR, Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation, terminal price percentiles
 - **Legacy API** — builder-pattern `SimulationEngine` for quick volatility fitting
 - **YAML Configuration** — declarative simulation configs with CLI template generation
@@ -39,7 +39,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.6.0"
+fluxquant = "1.7.0"
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1 --var-level 0.0
 fluxquant-cli run --config simulation.yaml
 ```
 
-The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast), and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
+The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in `tabled`-powered Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast), and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
 
 ### Library
 
@@ -91,7 +91,7 @@ println!("VaR  (5%):          {:+.2}%", result.summary.var * 100.0);
 println!("CVaR (5%):          {:+.2}%", result.summary.cvar * 100.0);
 println!("Target price:       {:.2}", result.price_median.last().unwrap());
 println!(
-    "Price percentiles: 2.5%: ${:.2}, 50%: ${:.2}, 97.5%: ${:.2}",
+    "Price percentiles: 2.5%: {:.2}, 50%: {:.2}, 97.5%: {:.2}",
     result.summary.price_percentiles[0],
     result.summary.price_percentiles[2],
     result.summary.price_percentiles[4]
@@ -118,7 +118,7 @@ The HTML dashboard includes four interactive Chart.js visualizations:
 |-------|-------------|
 | **Price Forecast** | Historical prices with median forecast and CI band |
 | **Volatility Forecast** | GARCH volatility point estimates with CI band |
-| **Bootstrap Fan Chart** | Up to 50 sampled Monte Carlo paths |
+| **Bootstrap Fan Chart** | Percentile bands (2.5%, 25%, 50%, 75%, 97.5%) with shaded regions |
 | **Terminal Price Distribution** | Histogram of final prices across all bootstrap paths |
 
 Plus four data tables:
