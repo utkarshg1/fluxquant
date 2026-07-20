@@ -142,6 +142,8 @@ pub struct SummaryStats {
     pub volatility_percentiles: [f64; 5],
     /// Sharpe ratio percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
     pub sharpe_percentiles: [f64; 5],
+    /// Terminal price percentiles (actual $): [2.5%, 25%, 50%, 75%, 97.5%]
+    pub price_percentiles: [f64; 5],
 }
 
 /// Full result of a GBM-GARCH simulation.
@@ -392,6 +394,10 @@ pub fn run_gbm_garch(
     let price_lower: Vec<f64> = norm_price_lower.iter().map(|p| p * last_price).collect();
     let price_upper: Vec<f64> = norm_price_upper.iter().map(|p| p * last_price).collect();
 
+    // Scale price percentiles to actual dollar terms
+    let mut summary = summary;
+    summary.price_percentiles = summary.price_percentiles.map(|p| p * last_price);
+
     Ok(SimulationResult {
         price_median,
         price_lower,
@@ -582,6 +588,12 @@ fn compute_summary(
         .try_into()
         .unwrap_or([0.0; 5]);
 
+    // Terminal prices across paths (normalized, scaled by caller)
+    let terminal_prices: Vec<f64> = paths.iter().filter_map(|p| p.last().copied()).collect();
+    let price_percentiles: [f64; 5] = compute_percentiles(&mut terminal_prices.clone(), &quantiles)
+        .try_into()
+        .unwrap_or([0.0; 5]);
+
     // Skewness and kurtosis of terminal returns
     let skewness = if std > 0.0 {
         terminal_returns
@@ -643,6 +655,7 @@ fn compute_summary(
         return_percentiles,
         volatility_percentiles,
         sharpe_percentiles,
+        price_percentiles,
     }
 }
 
@@ -767,6 +780,12 @@ pub fn generate_dashboard(
         .sharpe_percentiles
         .iter()
         .map(|v| format!("{:.3}", v))
+        .collect();
+    let pp: Vec<String> = result
+        .summary
+        .price_percentiles
+        .iter()
+        .map(|v| format!("${:.2}", v))
         .collect();
 
     let forecast_labels_json = serde_json_vec_str(&forecast_labels);
@@ -949,6 +968,7 @@ pub fn generate_dashboard(
       <tr><td>Annual Return</td><td>{rp0}%</td><td>{rp1}%</td><td>{rp2}%</td><td>{rp3}%</td><td>{rp4}%</td></tr>
       <tr><td>Annual Volatility</td><td>{vp0}%</td><td>{vp1}%</td><td>{vp2}%</td><td>{vp3}%</td><td>{vp4}%</td></tr>
       <tr><td>Sharpe Ratio</td><td>{sp0}</td><td>{sp1}</td><td>{sp2}</td><td>{sp3}</td><td>{sp4}</td></tr>
+      <tr><td>Terminal Price</td><td>{pp0}</td><td>{pp1}</td><td>{pp2}</td><td>{pp3}</td><td>{pp4}</td></tr>
     </table>
   </div>
 </div>
@@ -1103,6 +1123,11 @@ new Chart(document.getElementById('histChart'), {{
         sp2 = sp[2],
         sp3 = sp[3],
         sp4 = sp[4],
+        pp0 = pp[0],
+        pp1 = pp[1],
+        pp2 = pp[2],
+        pp3 = pp[3],
+        pp4 = pp[4],
         forecast_labels_json = forecast_labels_json,
         hist_labels_json = hist_labels_json,
         all_labels_json = all_labels_json,
@@ -1442,6 +1467,7 @@ mod tests {
                 return_percentiles: [-0.15, -0.02, 0.06, 0.12, 0.29],
                 volatility_percentiles: [0.10, 0.14, 0.17, 0.21, 0.28],
                 sharpe_percentiles: [-0.3, 0.1, 0.4, 0.7, 1.2],
+                price_percentiles: [95.0, 99.0, 101.0, 103.0, 108.0],
             },
             garch_order_selected: (1, 1),
             mu_drift: 0.001,

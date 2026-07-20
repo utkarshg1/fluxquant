@@ -527,72 +527,253 @@ async fn main() -> Result<()> {
             println!("{}", "── Simulation Results ──".cyan().bold());
             println!();
 
+            // ── Table 1: Summary Statistics ──
+            let w = 52;
+            println!("{}", format!("┌{}┐", "─".repeat(w)).cyan().bold());
+            println!(
+                "{} {}{} {}",
+                "║".cyan().bold(),
+                "Summary Statistics".cyan().bold(),
+                " ".repeat(w - 20),
+                "║".cyan().bold()
+            );
+            println!("{}", format!("├{}┤", "─".repeat(w)).cyan().bold());
+
             let ret = res.summary.mean_annual_return * 100.0;
             let ret_str = format!("{ret:+.2}%");
-            if ret >= 0.0 {
-                println!("  Mean ann return:  {}", ret_str.green());
-            } else {
-                println!("  Mean ann return:  {}", ret_str.red());
-            }
-
-            println!(
-                "  Ann volatility:   {}",
-                format!("{:.2}%", res.summary.annual_volatility * 100.0).yellow()
-            );
-
+            let vol_str = format!("{:.2}%", res.summary.annual_volatility * 100.0);
             let sharpe = res.summary.sharpe_ratio;
             let sharpe_str = format!("{sharpe:.3}");
-            if sharpe > 1.0 {
-                println!("  Sharpe:           {}", sharpe_str.green());
-            } else if sharpe >= 0.0 {
-                println!("  Sharpe:           {}", sharpe_str.yellow());
-            } else {
-                println!("  Sharpe:           {}", sharpe_str.red());
-            }
-
-            println!(
-                "  Max drawdown:     {}",
-                format!("{:.2}%", res.summary.max_drawdown * 100.0).red()
-            );
-            println!("  Drift (mu):       {:+.4}", res.mu_drift);
-            println!(
-                "  GARCH:            ({},{})",
+            let dd_str = format!("{:.2}%", res.summary.max_drawdown * 100.0);
+            let md_str = format!("{:.2}%", res.summary.median_drawdown * 100.0);
+            let skew_str = format!("{:.4}", res.summary.skewness);
+            let kurt_str = format!("{:.4}", res.summary.kurtosis);
+            let mu_str = format!("{:+.4}", res.mu_drift);
+            let garch_str = format!(
+                "({},{})",
                 res.garch_order_selected.0, res.garch_order_selected.1
             );
-            println!("  Bootstrap paths:  {nboot}");
 
+            let summary_rows = [
+                (
+                    "Mean Ann Return",
+                    &ret_str,
+                    if ret >= 0.0 { "green" } else { "red" },
+                ),
+                ("Ann Volatility", &vol_str, "yellow"),
+                (
+                    "Sharpe Ratio",
+                    &sharpe_str,
+                    if sharpe > 1.0 {
+                        "green"
+                    } else if sharpe >= 0.0 {
+                        "yellow"
+                    } else {
+                        "red"
+                    },
+                ),
+                ("Max Drawdown", &dd_str, "red"),
+                ("Median Drawdown", &md_str, "red"),
+                ("Skewness", &skew_str, "neutral"),
+                ("Excess Kurtosis", &kurt_str, "neutral"),
+                ("Drift (μ)", &mu_str, "white"),
+                ("GARCH Order", &garch_str, "white"),
+                ("Bootstrap Paths", &format!("{nboot}"), "white"),
+            ];
+
+            for (label, value, color) in &summary_rows {
+                let label_w = 18;
+                let val_w = w - label_w - 3;
+                let padding = val_w.saturating_sub(value.len());
+                let colored_val = match *color {
+                    "green" => value.green().to_string(),
+                    "red" => value.red().to_string(),
+                    "yellow" => value.yellow().to_string(),
+                    _ => value.white().bold().to_string(),
+                };
+                println!(
+                    "{}  {:<label_w$}{}{}{}",
+                    "║".cyan().bold(),
+                    label.white().bold(),
+                    colored_val,
+                    " ".repeat(padding),
+                    "║".cyan().bold()
+                );
+            }
+            println!("{}", format!("└{}┘", "─".repeat(w)).cyan().bold());
             println!();
-            println!(
-                "  VaR  ({var_level_pct}%):     {}",
-                format!("{:.2}%", res.summary.var * 100.0).red()
-            );
-            println!(
-                "  CVaR ({var_level_pct}%):     {}",
-                format!("{:.2}%", res.summary.cvar * 100.0).red()
-            );
 
-            let target = *res.price_median.last().unwrap_or(&0.0);
-            let ci_lo = *res.price_lower.last().unwrap_or(&0.0);
-            let ci_hi = *res.price_upper.last().unwrap_or(&0.0);
+            // ── Table 2: Risk Metrics ──
+            let risk_w = 30;
+            println!("{}", format!("┌{}┐", "─".repeat(risk_w)).cyan().bold());
+            println!(
+                "{} {}{} {}",
+                "║".cyan().bold(),
+                "Risk Metrics".cyan().bold(),
+                " ".repeat(risk_w - 14),
+                "║".cyan().bold()
+            );
+            println!("{}", format!("├{}┤", "─".repeat(risk_w)).cyan().bold());
 
+            let var_str = format!("{:.2}%", res.summary.var * 100.0);
+            let cvar_str = format!("{:.2}%", res.summary.cvar * 100.0);
+            let risk_rows = [
+                (format!("VaR  ({var_level_pct}%)"), &var_str),
+                (format!("CVaR ({var_level_pct}%)"), &cvar_str),
+            ];
+
+            for (label, value) in &risk_rows {
+                let label_w = 16;
+                let val_w = risk_w - label_w - 3;
+                let padding = val_w.saturating_sub(value.len());
+                println!(
+                    "{}  {:<label_w$}{}{}{}",
+                    "║".cyan().bold(),
+                    label.white().bold(),
+                    value.red(),
+                    " ".repeat(padding),
+                    "║".cyan().bold()
+                );
+            }
+            println!("{}", format!("└{}┘", "─".repeat(risk_w)).cyan().bold());
             println!();
+
+            // ── Table 3: Distribution Percentiles ──
+            let pct_w = 62;
+            println!("{}", format!("┌{}┐", "─".repeat(pct_w)).cyan().bold());
             println!(
-                "  Target price:     {} ({level_pct}% CI: {} to {})",
-                format!("{target:.2}").white().bold(),
-                format!("{ci_lo:.2}").white().bold(),
-                format!("{ci_hi:.2}").white().bold()
+                "{} {}{} {}",
+                "║".cyan().bold(),
+                "Distribution Percentiles".cyan().bold(),
+                " ".repeat(pct_w - 25),
+                "║".cyan().bold()
             );
+            println!("{}", format!("├{}┤", "─".repeat(pct_w)).cyan().bold());
+
+            // Header row
+            println!(
+                "{}  {:<18} {:>8} {:>8} {:>8} {:>8} {:>8}  {}",
+                "║".cyan().bold(),
+                "Metric".white().bold(),
+                "2.5%".white().bold(),
+                "25%".white().bold(),
+                "50%".white().bold(),
+                "75%".white().bold(),
+                "97.5%".white().bold(),
+                "║".cyan().bold()
+            );
+            println!("{}", format!("├{}┤", "─".repeat(pct_w)).cyan().bold());
+
+            // Return percentiles
+            let rp = &res.summary.return_percentiles;
+            println!(
+                "{}  {:<18} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}%  {}",
+                "║".cyan().bold(),
+                "Annual Return".white().bold(),
+                rp[0] * 100.0,
+                rp[1] * 100.0,
+                rp[2] * 100.0,
+                rp[3] * 100.0,
+                rp[4] * 100.0,
+                "║".cyan().bold()
+            );
+
+            // Volatility percentiles
+            let vp = &res.summary.volatility_percentiles;
+            println!(
+                "{}  {:<18} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}%  {}",
+                "║".cyan().bold(),
+                "Annual Volatility".white().bold(),
+                vp[0] * 100.0,
+                vp[1] * 100.0,
+                vp[2] * 100.0,
+                vp[3] * 100.0,
+                vp[4] * 100.0,
+                "║".cyan().bold()
+            );
+
+            // Sharpe percentiles
+            let sp = &res.summary.sharpe_percentiles;
+            println!(
+                "{}  {:<18} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3}  {}",
+                "║".cyan().bold(),
+                "Sharpe Ratio".white().bold(),
+                sp[0],
+                sp[1],
+                sp[2],
+                sp[3],
+                sp[4],
+                "║".cyan().bold()
+            );
+
+            // Price percentiles
+            let pp = &res.summary.price_percentiles;
+            println!(
+                "{}  {:<18} {:>7.2}$ {:>7.2}$ {:>7.2}$ {:>7.2}$ {:>7.2}$  {}",
+                "║".cyan().bold(),
+                "Terminal Price".white().bold(),
+                pp[0],
+                pp[1],
+                pp[2],
+                pp[3],
+                pp[4],
+                "║".cyan().bold()
+            );
+
+            println!("{}", format!("└{}┘", "─".repeat(pct_w)).cyan().bold());
+            println!();
 
             let out = output.unwrap_or_else(|| flux.workspace.join("results/dashboard.html"));
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&out, generate_dashboard(&sim_ticker, &res, &cp)?)?;
-            println!();
+
+            // ── Table 4: Price Forecast ──
+            let target = *res.price_median.last().unwrap_or(&0.0);
+            let ci_lo = *res.price_lower.last().unwrap_or(&0.0);
+            let ci_hi = *res.price_upper.last().unwrap_or(&0.0);
+
+            let price_w = 44;
+            println!("{}", format!("┌{}┐", "─".repeat(price_w)).cyan().bold());
             println!(
-                "  Dashboard:        {}",
-                format!("{}", out.display()).green()
+                "{} {}{} {}",
+                "║".cyan().bold(),
+                "Price Forecast".cyan().bold(),
+                " ".repeat(price_w - 16),
+                "║".cyan().bold()
             );
+            println!("{}", format!("├{}┤", "─".repeat(price_w)).cyan().bold());
+
+            let target_str = format!("{target:.2}");
+            let ci_str = format!("{ci_lo:.2} to {ci_hi:.2}");
+            let dash_str = format!("{}", out.display());
+            let ci_label = format!("{level_pct}% CI");
+
+            let price_rows = [
+                ("Target Price", &target_str, "white_bold"),
+                (ci_label.as_str(), &ci_str, "white_bold"),
+                ("Dashboard", &dash_str, "green"),
+            ];
+
+            for (label, value, color) in &price_rows {
+                let label_w = 16;
+                let val_w = price_w - label_w - 3;
+                let padding = val_w.saturating_sub(value.len());
+                let colored_val = match *color {
+                    "green" => value.green().to_string(),
+                    _ => value.white().bold().to_string(),
+                };
+                println!(
+                    "{}  {:<label_w$}{}{}{}",
+                    "║".cyan().bold(),
+                    label.white().bold(),
+                    colored_val,
+                    " ".repeat(padding),
+                    "║".cyan().bold()
+                );
+            }
+            println!("{}", format!("└{}┘", "─".repeat(price_w)).cyan().bold());
         }
     }
     Ok(())

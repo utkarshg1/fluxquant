@@ -10,7 +10,7 @@ Fluxquant treats market data as a continuous, streaming flow — emphasizing spe
 - **Auto GARCH Order Selection** — grid search over `(p,q)` combinations optimized by BIC
 - **Parallel Bootstrap** — rayon-powered Monte Carlo path simulation
 - **Interactive HTML Dashboard** — self-contained output with Chart.js visualizations
-- **Risk Analytics** — VaR, CVaR, Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation
+- **Risk Analytics** — VaR, CVaR, Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation, terminal price percentiles
 - **Legacy API** — builder-pattern `SimulationEngine` for quick volatility fitting
 - **YAML Configuration** — declarative simulation configs with CLI template generation
 
@@ -39,7 +39,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.5.0"
+fluxquant = "1.6.0"
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1 --var-level 0.0
 fluxquant-cli run --config simulation.yaml
 ```
 
-The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
+The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, displays results in Unicode box-drawing tables (Summary Statistics, Risk Metrics, Distribution Percentiles, Price Forecast), and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
 
 ### Library
 
@@ -91,10 +91,10 @@ println!("VaR  (5%):          {:+.2}%", result.summary.var * 100.0);
 println!("CVaR (5%):          {:+.2}%", result.summary.cvar * 100.0);
 println!("Target price:       {:.2}", result.price_median.last().unwrap());
 println!(
-    "Return percentiles: 2.5%: {:+.2}%, 50%: {:+.2}%, 97.5%: {:+.2}%",
-    result.summary.return_percentiles[0] * 100.0,
-    result.summary.return_percentiles[2] * 100.0,
-    result.summary.return_percentiles[4] * 100.0
+    "Price percentiles: 2.5%: ${:.2}, 50%: ${:.2}, 97.5%: ${:.2}",
+    result.summary.price_percentiles[0],
+    result.summary.price_percentiles[2],
+    result.summary.price_percentiles[4]
 );
 ```
 
@@ -121,9 +121,11 @@ The HTML dashboard includes four interactive Chart.js visualizations:
 | **Bootstrap Fan Chart** | Up to 50 sampled Monte Carlo paths |
 | **Terminal Price Distribution** | Histogram of final prices across all bootstrap paths |
 
-Plus two data tables:
-- **Summary Statistics** — mean return, annual volatility, Sharpe ratio, max/median drawdown, skewness, kurtosis, VaR, CVaR, t-df estimate, GARCH order, drift parameter
-- **Distribution Percentiles** — return, volatility, and Sharpe ratio at 2.5%, 25%, 50%, 75%, 97.5%
+Plus four data tables:
+- **Summary Statistics** — mean return, annual volatility, Sharpe ratio, max/median drawdown, skewness, kurtosis, drift parameter, GARCH order, bootstrap paths
+- **Risk Metrics** — VaR and CVaR at the configured tail level
+- **Distribution Percentiles** — return, volatility, Sharpe ratio, and terminal price at 2.5%, 25%, 50%, 75%, 97.5%
+- **Price Forecast** — target price, confidence interval, dashboard path
 
 ## Pipeline
 
@@ -133,7 +135,7 @@ Fluxquant uses a **GBM + GARCH** approach:
 2. **GARCH fitting** — fit a GARCH(p,q) model on log-returns (auto or manual order selection)
 3. **Volatility forecast** — forecast conditional volatility over the simulation horizon
 4. **GBM path simulation** — generate Monte Carlo paths using `S_{t+1} = S_t · exp((μ − σ²/2) · Δt + σ · ε)`
-5. **Percentile and risk summary** — compute return/volatility/drawdown percentiles across all paths
+5. **Percentile and risk summary** — compute return/volatility/drawdown/price percentiles across all paths
 
 ## License
 
