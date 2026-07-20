@@ -1,9 +1,21 @@
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "docsrs": {
       "type": "local",
       "command": ["docsrs-mcp"],
       "enabled": true
+    }
+  },
+  "lsp": {
+    "rust": {
+      "command": ["rust-analyzer"],
+      "extensions": [".rs"]
+    }
+  },
+  "formatter": {
+    "rustfmt": {
+      "disabled": false
     }
   }
 }

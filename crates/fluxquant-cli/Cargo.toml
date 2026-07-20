@@ -2,5 +2,17 @@
 name = "fluxquant-cli"
 version = "0.1.0"
 edition = "2024"
+authors = ["Utkarsh Gaikwad"]
+description = "Command-line interface for the fluxquant quantitative finance engine"
 
 [dependencies]
+fluxquant = { path = "../fluxquant-core" }
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1.0"
+indicatif = { version = "0.17", features = ["rayon"] }
+console = "0.15"
+yfinance-rs = "0.9.1"
+tokio = { version = "1", features = ["full"] }
+dirs = "6"

@@ -1,0 +1,30 @@
+# fluxquant SARIMA-GARCH simulation configuration
+simulation:
+  ticker: "AAPL"
+  forecast_years: 5
+  history_years: 3
+  confidence_level: 0.95
+  n_bootstrap: 10000
+
+sarima:
+  mode: "auto"
+  seasonal_period: 52
+  # manual orders (ignored when mode=auto):
+  # p: 1
+  # d: 1
+  # q: 1
+  # P: 1
+  # D: 1
+  # Q: 1
+
+garch:
+  mode: "optimize"
+  max_p: 3
+  max_q: 3
+  # when mode=fixed:
+  # p: 1
+  # q: 1
+
+output:
+  save_dashboard: true
+  dashboard_path: "./results/dashboard.html"

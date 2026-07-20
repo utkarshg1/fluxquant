@@ -2,5 +2,18 @@
 name = "fluxquant"
 version = "0.1.0"
 edition = "2024"
+authors = ["Utkarsh Gaikwad"]
+description = "High-performance quantitative finance and volatility modeling engine"
+license-file = "../../LICENSE"
+repository = "https://github.com/utkarshgaikwad/fluxquant"
+readme = "README.md"
 
 [dependencies]
+ndarray = { version = "0.16", features = ["rayon"] }
+rayon = "1.8"
+anofox-forecast = "0.15.8"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+chrono = "0.4"
+statrs = "0.18"
+rand = "0.8"
