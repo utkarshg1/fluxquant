@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "docsrs": {
+      "type": "local",
+      "command": ["docsrs-mcp"],
+      "enabled": true
+    }
+  }
+}
