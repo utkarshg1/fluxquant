@@ -1,21 +1,10 @@
-# fluxquant SARIMA-GARCH simulation configuration
+﻿# fluxquant GBM-GARCH simulation configuration
 simulation:
   ticker: "AAPL"
   forecast_years: 5
   history_years: 3
   confidence_level: 0.95
   n_bootstrap: 10000
-
-sarima:
-  mode: "auto"
-  seasonal_period: 52
-  # manual orders (ignored when mode=auto):
-  # p: 1
-  # d: 1
-  # q: 1
-  # P: 1
-  # D: 1
-  # Q: 1
 
 garch:
   mode: "optimize"

@@ -4,6 +4,16 @@ High-performance quantitative finance library built for speed and memory safety.
 
 Fluxquant treats market data as a continuous, streaming flow — emphasizing speed, native concurrency, and memory safety for Monte Carlo simulations, volatility modeling, and risk analytics.
 
+## Features
+
+- **GBM-GARCH Pipeline** — Geometric Brownian Motion with GARCH(p,q) volatility forecasting
+- **Auto GARCH Order Selection** — grid search over `(p,q)` combinations optimized by BIC
+- **Parallel Bootstrap** — rayon-powered Monte Carlo path simulation
+- **Interactive HTML Dashboard** — self-contained output with Chart.js visualizations
+- **Risk Analytics** — Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation
+- **Legacy API** — builder-pattern `SimulationEngine` for quick volatility fitting
+- **YAML Configuration** — declarative simulation configs with CLI template generation
+
 ## Architecture
 
 ```text
@@ -29,7 +39,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.2.0"
+fluxquant = "1.4.0"
 ```
 
 ## Usage
@@ -43,30 +53,34 @@ fluxquant-cli init
 # Generate a default simulation YAML template
 fluxquant-cli gen
 
-# Run a SARIMA-GARCH simulation
-fluxquant-cli run --ticker AAPL --years 5 --paths 10000
+# Run a GBM-GARCH simulation
+fluxquant-cli run --ticker AAPL --years 5
 
-# Run from a YAML config file
+# Specify GARCH order manually
+fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1
+
+# Use a YAML config file
 fluxquant-cli run --config simulation.yaml
 ```
+
+The CLI prints a branded ASCII art banner on startup and outputs an interactive HTML dashboard with charts and statistics.
 
 ### Library
 
 ```rust
-use fluxquant::{SimulationConfig, SarimaOrder, GarchOrder, run_sarima_garch};
+use fluxquant::{SimulationConfig, GarchOrder, run_gbm_garch};
 
 let config = SimulationConfig {
     forecast_weeks: 260,  // 5 years
     confidence_level: 0.95,
-    sarima_order: SarimaOrder::Auto { seasonal_period: 52 },
     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
     n_bootstrap: 10_000,
     seed: Some(42),
 };
 
-let result = run_sarima_garch(&weekly_log_returns, &config)?;
+let result = run_gbm_garch(&weekly_log_returns, &config)?;
 
-println!("Mean annual return: {:.2}%", result.summary.mean_annual_return * 100.0);
+println!("Mean annual return: {:+.2}%", result.summary.mean_annual_return * 100.0);
 println!("Annual volatility:  {:.2}%", result.summary.annual_volatility * 100.0);
 println!("Sharpe ratio:       {:.3}", result.summary.sharpe_ratio);
 println!("Max drawdown:       {:.2}% (worst case)", result.summary.max_drawdown * 100.0);
@@ -84,6 +98,43 @@ println!(
     result.summary.volatility_percentiles[4] * 100.0
 );
 ```
+
+### Legacy API
+
+For quick volatility estimation without the full simulation pipeline:
+
+```rust
+use fluxquant::SimulationEngine;
+
+let engine = SimulationEngine::builder().paths(1000).build();
+let annualized_vol = engine.fit_volatility(&weekly_returns)?;
+println!("Annualized volatility: {:.2}%", annualized_vol * 100.0);
+```
+
+## Dashboard
+
+The HTML dashboard includes four interactive Chart.js visualizations:
+
+| Chart | Description |
+|-------|-------------|
+| **Price Forecast** | Median price path with confidence interval band |
+| **Volatility Forecast** | GARCH volatility point estimates with CI band |
+| **Bootstrap Fan Chart** | Up to 50 sampled Monte Carlo paths |
+| **Terminal Price Distribution** | Histogram of final prices across all bootstrap paths |
+
+Plus two data tables:
+- **Summary Statistics** — mean return, annual volatility, Sharpe ratio, max/median drawdown, skewness, kurtosis, t-df estimate, GARCH order, drift parameter
+- **Distribution Percentiles** — return, volatility, and Sharpe ratio at 2.5%, 25%, 50%, 75%, 97.5%
+
+## Pipeline
+
+Fluxquant uses a **GBM + GARCH** approach:
+
+1. **Drift estimation** — compute the drift parameter μ from historical log-returns
+2. **GARCH fitting** — fit a GARCH(p,q) model on log-returns (auto or manual order selection)
+3. **Volatility forecast** — forecast conditional volatility over the simulation horizon
+4. **GBM path simulation** — generate Monte Carlo paths using `S_{t+1} = S_t · exp((μ − σ²/2) · Δt + σ · ε)`
+5. **Percentile and risk summary** — compute return/volatility/drawdown percentiles across all paths
 
 ## License
 

@@ -1,21 +1,18 @@
 [package]
 name = "fluxquant"
-version = "1.2.0"
+version = "1.4.0"
 edition = "2024"
 authors = ["Utkarsh Gaikwad"]
 description = "High-performance quantitative finance and volatility modeling engine"
-license-file = "../../LICENSE"
+license = "LicenseRef-All-Rights-Reserved"
 repository = "https://github.com/utkarshgaikwad/fluxquant"
 readme = "README.md"
-keywords = ["finance", "quantitative", "sarima", "garch", "volatility"]
+keywords = ["finance", "quantitative", "garch", "gbm", "volatility"]
 categories = ["science", "mathematics"]
 
 [dependencies]
-ndarray = { version = "0.16", features = ["rayon"] }
 rayon = "1.8"
 anofox-forecast = "0.15.8"
 thiserror = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4"
-statrs = "0.18"
 rand = "0.8"

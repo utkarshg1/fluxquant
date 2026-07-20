@@ -1,13 +1,13 @@
 [package]
 name = "fluxquant-cli"
-version = "1.2.0"
+version = "1.4.0"
 edition = "2024"
 authors = ["Utkarsh Gaikwad"]
 description = "Command-line interface for the fluxquant quantitative finance engine"
-license = "All-Rights-Reserved"
+license = "LicenseRef-All-Rights-Reserved"
 repository = "https://github.com/utkarshgaikwad/fluxquant"
 readme = "../../README.md"
-keywords = ["finance", "quantitative", "sarima", "garch", "monte-carlo"]
+keywords = ["finance", "quantitative", "garch", "gbm", "monte-carlo"]
 categories = ["command-line-utilities", "science"]
 
 [dependencies]
@@ -16,8 +16,6 @@ clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 anyhow = "1.0"
-indicatif = { version = "0.17", features = ["rayon"] }
-console = "0.15"
 yfinance-rs = "0.9.1"
 tokio = { version = "1", features = ["full"] }
 dirs = "6"

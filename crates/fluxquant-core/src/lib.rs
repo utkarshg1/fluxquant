@@ -6,99 +6,97 @@
 //! speed, native concurrency, and memory safety for Monte Carlo simulations,
 //! volatility modeling, and risk analytics.
 //!
-//! ## Example
+//! ## Features
+//!
+//! - **GBM-GARCH Pipeline** — Geometric Brownian Motion with GARCH volatility forecasting
+//! - **Auto GARCH Order Selection** — grid search over `(p,q)` combinations with BIC optimization
+//! - **Parallel Bootstrap** — rayon-powered Monte Carlo path simulation
+//! - **Interactive Dashboard** — self-contained HTML output with Chart.js visualizations
+//! - **Risk Analytics** — Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation
+//!
+//! ## Quick Start
 //!
 //! ```rust
-//! use fluxquant::{SimulationConfig, SarimaOrder, GarchOrder, run_sarima_garch};
+//! use fluxquant::{SimulationConfig, GarchOrder, run_gbm_garch};
 //!
 //! let config = SimulationConfig {
-//!     forecast_weeks: 260,
+//!     forecast_weeks: 260,  // 5 years
 //!     confidence_level: 0.95,
-//!     sarima_order: SarimaOrder::Auto { seasonal_period: 52 },
 //!     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
-//!     n_bootstrap: 1000,
+//!     n_bootstrap: 10_000,
 //!     seed: Some(42),
 //! };
 //!
-//! // With real weekly returns data:
-//! // let result = run_sarima_garch(&weekly_returns, &config).unwrap();
+//! // With real weekly log-returns:
+//! // let result = run_gbm_garch(&weekly_log_returns, &config).unwrap();
+//! // println!("Mean annual return: {:+.2}%", result.summary.mean_annual_return * 100.0);
 //! ```
+//!
+//! ## Pipeline
+//!
+//! 1. **Drift estimation** — compute `μ` from historical log-returns
+//! 2. **GARCH fitting** — fit GARCH(p,q) on returns (auto or manual order)
+//! 3. **Volatility forecast** — forecast conditional variance over the horizon
+//! 4. **GBM path simulation** — `S_{t+1} = S_t · exp((μ − σ²/2) + σ · ε)`
+//! 5. **Percentile & risk summary** — return/vol/drawdown distributions across all paths
 
 use rayon::prelude::*;
 use thiserror::Error;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
-/// Errors that can occur during fluxquant operations.
+/// Errors that can occur during simulation, fitting, or dashboard generation.
 #[derive(Error, Debug)]
 pub enum FluxError {
-    /// Raised when a simulation fails to converge or encounters invalid state.
+    /// The simulation pipeline failed (e.g. insufficient data).
     #[error("Simulation failed: {0}")]
     SimulationError(String),
 
-    /// Raised when volatility model fitting fails.
+    /// Volatility model fitting failed.
     #[error("Volatility fitting error: {0}")]
     VolatilityError(String),
 
-    /// Raised when SARIMA model fitting fails.
-    #[error("SARIMA fitting error: {0}")]
-    SARIMAError(String),
-
-    /// Raised when GARCH model fitting fails.
+    /// GARCH model fitting or forecasting failed.
     #[error("GARCH fitting error: {0}")]
     GARCHError(String),
 
-    /// Raised when dashboard generation fails.
+    /// HTML dashboard generation failed.
     #[error("Dashboard generation error: {0}")]
     DashboardError(String),
 }
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-/// SARIMA order specification.
-#[derive(Debug, Clone)]
-pub enum SarimaOrder {
-    /// Automatically select best SARIMA order using AutoARIMA.
-    Auto {
-        /// Seasonal period (e.g. 52 for weekly data with yearly seasonality).
-        seasonal_period: usize,
-    },
-    /// Manually specify SARIMA(p,d,q)(P,D,Q)[s] orders.
-    #[allow(non_snake_case)]
-    Manual {
-        p: usize,
-        d: usize,
-        q: usize,
-        P: usize,
-        D: usize,
-        Q: usize,
-        s: usize,
-    },
-}
-
 /// GARCH order specification.
 #[derive(Debug, Clone)]
 pub enum GarchOrder {
     /// Grid search over (p,q) combinations, select best by BIC.
-    Auto {
-        /// Maximum GARCH order p to test.
-        max_p: usize,
-        /// Maximum GARCH order q to test.
-        max_q: usize,
-    },
+    Auto { max_p: usize, max_q: usize },
     /// Fixed GARCH(p,q) order.
     Manual { p: usize, q: usize },
 }
 
-/// Configuration for the SARIMA-GARCH simulation.
+/// Configuration for the GBM-GARCH simulation.
+///
+/// # Example
+///
+/// ```rust
+/// use fluxquant::{SimulationConfig, GarchOrder};
+///
+/// let config = SimulationConfig {
+///     forecast_weeks: 260,
+///     confidence_level: 0.95,
+///     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
+///     n_bootstrap: 10_000,
+///     seed: Some(42),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
     /// Number of weeks to forecast.
     pub forecast_weeks: usize,
     /// Confidence level for intervals (e.g. 0.95 for 95%).
     pub confidence_level: f64,
-    /// SARIMA order specification.
-    pub sarima_order: SarimaOrder,
     /// GARCH order specification.
     pub garch_order: GarchOrder,
     /// Number of bootstrap paths for simulation.
@@ -109,19 +107,6 @@ pub struct SimulationConfig {
 
 // ─── Results ──────────────────────────────────────────────────────────────────
 
-/// A forecast with point estimates and confidence bounds.
-#[derive(Debug, Clone)]
-pub struct ForecastResult {
-    /// Point forecast values.
-    pub point: Vec<f64>,
-    /// Lower confidence bound.
-    pub lower: Vec<f64>,
-    /// Upper confidence bound.
-    pub upper: Vec<f64>,
-    /// Confidence level used (e.g. 0.95).
-    pub level: f64,
-}
-
 /// Summary statistics for the simulation.
 #[derive(Debug, Clone)]
 pub struct SummaryStats {
@@ -131,9 +116,9 @@ pub struct SummaryStats {
     pub annual_volatility: f64,
     /// Sharpe ratio (assuming 0 risk-free rate).
     pub sharpe_ratio: f64,
-    /// Worst-case max drawdown across all bootstrap paths (negative convention).
+    /// Worst-case max drawdown across all bootstrap paths.
     pub max_drawdown: f64,
-    /// Median max drawdown across bootstrap paths (negative convention).
+    /// Median max drawdown across bootstrap paths.
     pub median_drawdown: f64,
     /// Return distribution skewness.
     pub skewness: f64,
@@ -149,21 +134,29 @@ pub struct SummaryStats {
     pub sharpe_percentiles: [f64; 5],
 }
 
-/// Full result of a SARIMA-GARCH simulation.
+/// Full result of a GBM-GARCH simulation.
 #[derive(Debug, Clone)]
 pub struct SimulationResult {
-    /// SARIMA returns forecast with confidence intervals.
-    pub returns_forecast: ForecastResult,
-    /// GARCH volatility forecast with confidence intervals.
-    pub volatility_forecast: ForecastResult,
+    /// Median price path (normalized to start at 1.0).
+    pub price_median: Vec<f64>,
+    /// Lower confidence bound for price path.
+    pub price_lower: Vec<f64>,
+    /// Upper confidence bound for price path.
+    pub price_upper: Vec<f64>,
+    /// GARCH volatility forecast point estimates.
+    pub vol_forecast: Vec<f64>,
+    /// GARCH volatility forecast lower CI.
+    pub vol_lower: Vec<f64>,
+    /// GARCH volatility forecast upper CI.
+    pub vol_upper: Vec<f64>,
     /// Complete bootstrap price paths (one Vec per path).
     pub bootstrap_paths: Vec<Vec<f64>>,
     /// Summary statistics.
     pub summary: SummaryStats,
-    /// Actual GARCH order selected (p, q).
+    /// GARCH order selected (p, q).
     pub garch_order_selected: (usize, usize),
-    /// Actual SARIMA order as a display string.
-    pub sarima_order_selected: String,
+    /// Estimated drift (mean log-return).
+    pub mu_drift: f64,
 }
 
 // ─── GARCH Optimization ───────────────────────────────────────────────────────
@@ -223,8 +216,13 @@ fn fit_garch_and_bic(
 
 /// Grid search over GARCH(p,q) orders, selecting the best by BIC.
 ///
-/// Tests all combinations of p in `1..=max_p` and q in `1..=max_q`,
+/// Tests all combinations of `p` in `1..=max_p` and `q` in `1..=max_q`,
 /// fits each model, and returns the one with the lowest BIC.
+///
+/// # Errors
+///
+/// Returns [`FluxError::GARCHError`] if fewer than 12 observations are provided
+/// or if all model fits fail.
 pub fn optimize_garch(
     returns: &[f64],
     max_p: usize,
@@ -265,18 +263,23 @@ pub fn optimize_garch(
     Ok((model, best_p, best_q))
 }
 
-// ─── SARIMA-GARCH Pipeline ────────────────────────────────────────────────────
+// ─── GBM-GARCH Pipeline ───────────────────────────────────────────────────────
 
-/// Run the full SARIMA-GARCH simulation pipeline.
+/// Run the full GBM-GARCH simulation pipeline.
 ///
-/// 1. Fits SARIMA (auto or manual) to weekly returns → return forecasts + CI
-/// 2. Extracts SARIMA residuals
-/// 3. Fits GARCH(1,1) on residuals → volatility forecasts + CI
-/// 4. Runs parallel bootstrap for full path distributions
-/// 5. Computes summary statistics
+/// 1. Estimates drift `μ` from historical log-returns
+/// 2. Fits GARCH(p,q) on returns (auto or manual order selection)
+/// 3. Forecasts conditional volatility with confidence bands
+/// 4. Generates Monte Carlo paths via GBM bootstrap
+/// 5. Computes percentile bands and summary risk statistics
 ///
-/// `weekly_returns` should be log-returns: ln(P_t / P_{t-1}).
-pub fn run_sarima_garch(
+/// `weekly_returns` should be log-returns: `ln(P_t / P_{t-1})`.
+///
+/// # Errors
+///
+/// Returns [`FluxError::SimulationError`] if fewer than 20 observations are provided.
+/// Returns [`FluxError::GARCHError`] if GARCH fitting or variance forecasting fails.
+pub fn run_gbm_garch(
     weekly_returns: &[f64],
     config: &SimulationConfig,
 ) -> Result<SimulationResult, FluxError> {
@@ -286,270 +289,108 @@ pub fn run_sarima_garch(
         ));
     }
 
-    use anofox_forecast::core::TimeSeries;
-    use anofox_forecast::models::Forecaster;
-    use chrono::{TimeZone, Utc};
+    let n = weekly_returns.len();
 
-    let timestamps: Vec<_> = (0..weekly_returns.len())
-        .map(|i| {
-            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap() + chrono::Duration::weeks(i as i64)
+    let mu_drift: f64 = weekly_returns.iter().sum::<f64>() / n as f64;
+
+    let (garch_model, selected_p, selected_q) = match &config.garch_order {
+        GarchOrder::Auto { max_p, max_q } => optimize_garch(weekly_returns, *max_p, *max_q)?,
+        GarchOrder::Manual { p, q } => {
+            use anofox_forecast::core::TimeSeries;
+            use anofox_forecast::models::Forecaster;
+            use chrono::{TimeZone, Utc};
+
+            let timestamps: Vec<_> = (0..n)
+                .map(|i| {
+                    Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()
+                        + chrono::Duration::days(i as i64)
+                })
+                .collect();
+            let ts = TimeSeries::univariate(timestamps, weekly_returns.to_vec())
+                .map_err(|e| FluxError::GARCHError(format!("Failed to create TimeSeries: {e}")))?;
+            let mut gm = anofox_forecast::models::GARCH::new(*p, *q);
+            gm.fit(&ts)
+                .map_err(|e| FluxError::GARCHError(format!("GARCH({p},{q}) fit failed: {e}")))?;
+            (gm, *p, *q)
+        }
+    };
+
+    let variance_forecast = garch_model
+        .forecast_variance(config.forecast_weeks)
+        .map_err(|e| FluxError::GARCHError(format!("GARCH variance forecast failed: {e}")))?;
+
+    let vol_forecast: Vec<f64> = variance_forecast.iter().map(|v| v.sqrt()).collect();
+
+    let z = normal_inv_cdf((1.0 + config.confidence_level) / 2.0);
+    let vol_lower: Vec<f64> = vol_forecast
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
+            (v - z * se).max(0.0)
+        })
+        .collect();
+    let vol_upper: Vec<f64> = vol_forecast
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
+            v + z * se
         })
         .collect();
 
-    let ts = TimeSeries::univariate(timestamps.clone(), weekly_returns.to_vec())
-        .map_err(|e| FluxError::SARIMAError(format!("Failed to create TimeSeries: {e}")))?;
+    let res_variance = weekly_returns
+        .iter()
+        .map(|r| (r - mu_drift).powi(2))
+        .sum::<f64>()
+        / n as f64;
+    let res_std = res_variance.sqrt();
+    let standardized_returns: Vec<f64> = if res_std > 0.0 {
+        weekly_returns
+            .iter()
+            .map(|&r| (r - mu_drift) / res_std)
+            .collect()
+    } else {
+        weekly_returns.to_vec()
+    };
 
-    // ── Step 1: Fit SARIMA ────────────────────────────────────────────────
-    match &config.sarima_order {
-        SarimaOrder::Auto { seasonal_period } => {
-            let mut m = anofox_forecast::models::arima::AutoARIMA::seasonal(*seasonal_period);
-            m.fit(&ts)
-                .map_err(|e| FluxError::SARIMAError(format!("AutoARIMA fit failed: {e}")))?;
+    let bootstrap_paths = run_gbm_bootstrap(
+        &standardized_returns,
+        mu_drift,
+        &vol_forecast,
+        config.forecast_weeks,
+        config.n_bootstrap,
+        config.seed,
+    );
 
-            let sarima_order_str = m
-                .selected_full_order()
-                .map(|o| {
-                    format!(
-                        "({},{},{})({},{},{})[{}]",
-                        o.p, o.d, o.q, o.cap_p, o.cap_d, o.cap_q, o.s
-                    )
-                })
-                .unwrap_or_else(|| "AutoARIMA".into());
+    let (price_median, price_lower, price_upper) =
+        compute_price_percentiles(&bootstrap_paths, config.confidence_level);
 
-            let sarima_forecast = m
-                .predict_with_intervals(config.forecast_weeks, config.confidence_level)
-                .map_err(|e| FluxError::SARIMAError(format!("SARIMA predict failed: {e}")))?;
+    let summary = compute_summary(&bootstrap_paths, weekly_returns);
 
-            let sarima_returns = ForecastResult {
-                point: sarima_forecast.primary().to_vec(),
-                lower: sarima_forecast
-                    .lower_series(0)
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default(),
-                upper: sarima_forecast
-                    .upper_series(0)
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default(),
-                level: config.confidence_level,
-            };
-
-            let residuals = m.residuals().ok_or_else(|| {
-                FluxError::SARIMAError("No residuals available after SARIMA fit".into())
-            })?;
-
-            // ── Step 3: Fit GARCH on residuals ────────────────────────────
-            let (garch_model, selected_p, selected_q) = match &config.garch_order {
-                GarchOrder::Auto { max_p, max_q } => optimize_garch(residuals, *max_p, *max_q)?,
-                GarchOrder::Manual { p, q } => {
-                    let residual_ts = TimeSeries::univariate(timestamps, residuals.to_vec())
-                        .map_err(|e| {
-                            FluxError::GARCHError(format!(
-                                "Failed to create residual TimeSeries: {e}"
-                            ))
-                        })?;
-                    let mut gm = anofox_forecast::models::GARCH::new(*p, *q);
-                    gm.fit(&residual_ts).map_err(|e| {
-                        FluxError::GARCHError(format!("GARCH({p},{q}) fit failed: {e}"))
-                    })?;
-                    (gm, *p, *q)
-                }
-            };
-
-            // GARCH variance forecast → volatility CI
-            let variance_forecast = garch_model
-                .forecast_variance(config.forecast_weeks)
-                .map_err(|e| {
-                    FluxError::GARCHError(format!("GARCH variance forecast failed: {e}"))
-                })?;
-
-            let vol_point: Vec<f64> = variance_forecast.iter().map(|v| v.sqrt()).collect();
-
-            let vol_level = config.confidence_level;
-            let z = normal_inv_cdf((1.0 + vol_level) / 2.0);
-            let vol_lower: Vec<f64> = vol_point
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
-                    (v - z * se).max(0.0)
-                })
-                .collect();
-            let vol_upper: Vec<f64> = vol_point
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
-                    v + z * se
-                })
-                .collect();
-
-            let volatility_forecast = ForecastResult {
-                point: vol_point,
-                lower: vol_lower,
-                upper: vol_upper,
-                level: config.confidence_level,
-            };
-
-            // ── Step 4: Parallel bootstrap ────────────────────────────────
-            let mean_return = weekly_returns.iter().sum::<f64>() / weekly_returns.len() as f64;
-            let res_std =
-                (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt();
-            let standardized_residuals: Vec<f64> = if res_std > 0.0 {
-                residuals.iter().map(|&r| r / res_std).collect()
-            } else {
-                residuals.to_vec()
-            };
-            let bootstrap_paths = run_parallel_bootstrap(
-                &standardized_residuals,
-                mean_return,
-                &volatility_forecast.point,
-                config.forecast_weeks,
-                config.n_bootstrap,
-                config.seed,
-            );
-
-            // ── Step 5: Summary statistics ────────────────────────────────
-            let summary = compute_summary(&bootstrap_paths, weekly_returns);
-
-            return Ok(SimulationResult {
-                returns_forecast: sarima_returns,
-                volatility_forecast,
-                bootstrap_paths,
-                summary,
-                garch_order_selected: (selected_p, selected_q),
-                sarima_order_selected: sarima_order_str,
-            });
-        }
-        SarimaOrder::Manual {
-            p,
-            d,
-            q,
-            P,
-            D,
-            Q,
-            s,
-        } => {
-            let mut m = anofox_forecast::models::arima::SARIMA::new(*p, *d, *q, *P, *D, *Q, *s);
-            m.fit(&ts).map_err(|e| {
-                FluxError::SARIMAError(format!(
-                    "SARIMA({p},{d},{q})({P},{D},{Q})[{s}] fit failed: {e}"
-                ))
-            })?;
-
-            let sarima_order_str = format!("({p},{d},{q})({P},{D},{Q})[{s}]");
-
-            let sarima_forecast = m
-                .predict_with_intervals(config.forecast_weeks, config.confidence_level)
-                .map_err(|e| FluxError::SARIMAError(format!("SARIMA predict failed: {e}")))?;
-
-            let sarima_returns = ForecastResult {
-                point: sarima_forecast.primary().to_vec(),
-                lower: sarima_forecast
-                    .lower_series(0)
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default(),
-                upper: sarima_forecast
-                    .upper_series(0)
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default(),
-                level: config.confidence_level,
-            };
-
-            let residuals = m.residuals().ok_or_else(|| {
-                FluxError::SARIMAError("No residuals available after SARIMA fit".into())
-            })?;
-
-            let (garch_model, selected_p, selected_q) = match &config.garch_order {
-                GarchOrder::Auto { max_p, max_q } => optimize_garch(residuals, *max_p, *max_q)?,
-                GarchOrder::Manual { p: gp, q: gq } => {
-                    let residual_ts = TimeSeries::univariate(timestamps, residuals.to_vec())
-                        .map_err(|e| {
-                            FluxError::GARCHError(format!(
-                                "Failed to create residual TimeSeries: {e}"
-                            ))
-                        })?;
-                    let mut gm = anofox_forecast::models::GARCH::new(*gp, *gq);
-                    gm.fit(&residual_ts).map_err(|e| {
-                        FluxError::GARCHError(format!("GARCH({gp},{gq}) fit failed: {e}"))
-                    })?;
-                    (gm, *gp, *gq)
-                }
-            };
-
-            let variance_forecast = garch_model
-                .forecast_variance(config.forecast_weeks)
-                .map_err(|e| {
-                    FluxError::GARCHError(format!("GARCH variance forecast failed: {e}"))
-                })?;
-
-            let vol_point: Vec<f64> = variance_forecast.iter().map(|v| v.sqrt()).collect();
-            let vol_level = config.confidence_level;
-            let z = normal_inv_cdf((1.0 + vol_level) / 2.0);
-            let vol_lower: Vec<f64> = vol_point
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
-                    (v - z * se).max(0.0)
-                })
-                .collect();
-            let vol_upper: Vec<f64> = vol_point
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    let se = v * (2.0 / (i as f64 + 1.0)).sqrt();
-                    v + z * se
-                })
-                .collect();
-
-            let volatility_forecast = ForecastResult {
-                point: vol_point,
-                lower: vol_lower,
-                upper: vol_upper,
-                level: config.confidence_level,
-            };
-
-            let mean_return = weekly_returns.iter().sum::<f64>() / weekly_returns.len() as f64;
-            let res_std =
-                (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt();
-            let standardized_residuals: Vec<f64> = if res_std > 0.0 {
-                residuals.iter().map(|&r| r / res_std).collect()
-            } else {
-                residuals.to_vec()
-            };
-            let bootstrap_paths = run_parallel_bootstrap(
-                &standardized_residuals,
-                mean_return,
-                &volatility_forecast.point,
-                config.forecast_weeks,
-                config.n_bootstrap,
-                config.seed,
-            );
-
-            let summary = compute_summary(&bootstrap_paths, weekly_returns);
-
-            return Ok(SimulationResult {
-                returns_forecast: sarima_returns,
-                volatility_forecast,
-                bootstrap_paths,
-                summary,
-                garch_order_selected: (selected_p, selected_q),
-                sarima_order_selected: sarima_order_str,
-            });
-        }
-    }
+    Ok(SimulationResult {
+        price_median,
+        price_lower,
+        price_upper,
+        vol_forecast,
+        vol_lower,
+        vol_upper,
+        bootstrap_paths,
+        summary,
+        garch_order_selected: (selected_p, selected_q),
+        mu_drift,
+    })
 }
 
-// ─── Bootstrap ────────────────────────────────────────────────────────────────
+// ─── GBM Bootstrap ────────────────────────────────────────────────────────────
 
-/// Run parallel bootstrap simulation using rayon.
+/// Run parallel GBM bootstrap simulation using rayon.
 ///
-/// Resamples standardized residuals with replacement, reconstructs
-/// synthetic return paths using GARCH conditional volatility, and
-/// accumulates to price paths.
-fn run_parallel_bootstrap(
-    residuals: &[f64],
-    mean_return: f64,
+/// For each path, resamples standardized returns with replacement and applies
+/// the GBM equation: `S_{t+1} = S_t · exp((μ − σ²/2) + σ · ε)`.
+fn run_gbm_bootstrap(
+    standardized_returns: &[f64],
+    mu: f64,
     vol_forecast: &[f64],
     forecast_weeks: usize,
     n_paths: usize,
@@ -557,8 +398,6 @@ fn run_parallel_bootstrap(
 ) -> Vec<Vec<f64>> {
     use rand::SeedableRng;
     use rand::seq::SliceRandom;
-
-    let _n_obs = residuals.len();
 
     (0..n_paths)
         .into_par_iter()
@@ -573,14 +412,14 @@ fn run_parallel_bootstrap(
             path.push(1.0); // normalized starting price
 
             for t in 0..forecast_weeks {
-                let resampled = *residuals.choose(&mut rng).unwrap_or(&0.0);
-                let vol = vol_forecast
+                let epsilon = *standardized_returns.choose(&mut rng).unwrap_or(&0.0);
+                let sigma = vol_forecast
                     .get(t)
                     .copied()
                     .unwrap_or(vol_forecast.last().copied().unwrap_or(0.02));
-                let weekly_return = mean_return + vol * resampled;
                 let prev = *path.last().unwrap_or(&1.0);
-                path.push(prev * weekly_return.exp());
+                let s_t = prev * (mu - 0.5 * sigma * sigma + sigma * epsilon).exp();
+                path.push(s_t);
             }
 
             path
@@ -588,10 +427,38 @@ fn run_parallel_bootstrap(
         .collect()
 }
 
+// ─── Percentiles from paths ───────────────────────────────────────────────────
+
+fn compute_price_percentiles(
+    paths: &[Vec<f64>],
+    confidence_level: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    if paths.is_empty() || paths[0].is_empty() {
+        return (vec![], vec![], vec![]);
+    }
+    let n_steps = paths[0].len();
+    let lower_q = (1.0 - confidence_level) / 2.0;
+    let upper_q = 1.0 - lower_q;
+
+    let mut med = Vec::with_capacity(n_steps);
+    let mut low = Vec::with_capacity(n_steps);
+    let mut high = Vec::with_capacity(n_steps);
+
+    for step in 0..n_steps {
+        let mut vals: Vec<f64> = paths.iter().map(|p| p[step]).collect();
+        let p = compute_percentiles(&mut vals, &[lower_q, 0.5, upper_q]);
+        low.push(p[0]);
+        med.push(p[1]);
+        high.push(p[2]);
+    }
+
+    (med, low, high)
+}
+
 // ─── Summary Statistics ───────────────────────────────────────────────────────
 
 /// Compute quantile values from a dataset.
-/// `quantiles` should be in [0.0, 1.0] range.
+/// `quantiles` should be in `[0.0, 1.0]` range.
 fn compute_percentiles(sorted_data: &mut [f64], quantiles: &[f64]) -> Vec<f64> {
     sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted_data.len();
@@ -632,8 +499,6 @@ fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummarySt
     let std = variance.sqrt();
 
     // Annualize (assuming weekly data, ~52 weeks/year)
-    // `mean` and `std` are computed from terminal log-returns over the full forecast period,
-    // so we annualize by dividing by forecast years (= forecast_weeks/52).
     let forecast_weeks = paths.first().map(|p| p.len() - 1).unwrap_or(52) as f64;
     let forecast_years = forecast_weeks / 52.0;
     let mean_annual_return = mean / forecast_years;
@@ -689,12 +554,11 @@ fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummarySt
 
     // Skewness and kurtosis of terminal returns
     let skewness = if std > 0.0 {
-        let m3 = terminal_returns
+        terminal_returns
             .iter()
             .map(|r| ((r - mean) / std).powi(3))
             .sum::<f64>()
-            / n;
-        m3
+            / n
     } else {
         0.0
     };
@@ -724,8 +588,8 @@ fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummarySt
         max_drawdown,
         median_drawdown,
         skewness,
-        kurtosis,
         t_df_estimate,
+        kurtosis,
         return_percentiles,
         volatility_percentiles,
         sharpe_percentiles,
@@ -753,17 +617,22 @@ fn compute_max_drawdown(path: &[f64]) -> f64 {
 /// Generate a self-contained HTML dashboard with interactive Chart.js visualizations.
 ///
 /// Returns the full HTML string. The dashboard includes:
-/// - Returns forecast chart with CI band
-/// - Volatility forecast chart with CI band
+/// - Price forecast chart with confidence band
+/// - Volatility forecast chart with confidence band
 /// - Bootstrap fan chart
 /// - Terminal price distribution histogram
 /// - Summary statistics table
+/// - Distribution percentiles table
+///
+/// # Errors
+///
+/// Returns [`FluxError::DashboardError`] if data serialization fails.
 pub fn generate_dashboard(
     ticker: &str,
     result: &SimulationResult,
     historical_prices: &[f64],
 ) -> Result<String, FluxError> {
-    let n = result.returns_forecast.point.len();
+    let n = result.price_median.len();
     let forecast_labels: Vec<String> = (1..=n).map(|w| format!("W{w}")).collect();
 
     // Sample bootstrap paths for fan chart (max 50 paths)
@@ -791,7 +660,75 @@ pub fn generate_dashboard(
     let mut all_labels = hist_labels.clone();
     all_labels.extend(forecast_labels.iter().cloned());
 
-    let level_pct = (result.returns_forecast.level * 100.0).round() as usize;
+    let level_pct = 95_usize;
+    let gp = result.garch_order_selected.0;
+    let gq = result.garch_order_selected.1;
+
+    let ret_cls = if result.summary.mean_annual_return >= 0.0 {
+        "positive"
+    } else {
+        "negative"
+    };
+    let sharpe_cls = if result.summary.sharpe_ratio >= 0.5 {
+        "positive"
+    } else if result.summary.sharpe_ratio >= 0.0 {
+        "neutral"
+    } else {
+        "negative"
+    };
+    let skew_cls = if result.summary.skewness.abs() < 0.5 {
+        "neutral"
+    } else {
+        "negative"
+    };
+    let kurt_cls = if result.summary.kurtosis > 1.0 {
+        "negative"
+    } else {
+        "neutral"
+    };
+
+    // Pre-compute all formatted values
+    let ret_pct = format!("{:.2}", result.summary.mean_annual_return * 100.0);
+    let vol_pct = format!("{:.2}", result.summary.annual_volatility * 100.0);
+    let sharpe_val = format!("{:.3}", result.summary.sharpe_ratio);
+    let dd_pct = format!("{:.2}", result.summary.max_drawdown * 100.0);
+    let md_pct = format!("{:.2}", result.summary.median_drawdown * 100.0);
+    let skew_val = format!("{:.4}", result.summary.skewness);
+    let kurt_val = format!("{:.4}", result.summary.kurtosis);
+    let t_df_val = format!("{:.2}", result.summary.t_df_estimate);
+    let mu_drift_val = format!("{:+.4}", result.mu_drift);
+    let rp: Vec<String> = result
+        .summary
+        .return_percentiles
+        .iter()
+        .map(|v| format!("{:.2}", v * 100.0))
+        .collect();
+    let vp: Vec<String> = result
+        .summary
+        .volatility_percentiles
+        .iter()
+        .map(|v| format!("{:.2}", v * 100.0))
+        .collect();
+    let sp: Vec<String> = result
+        .summary
+        .sharpe_percentiles
+        .iter()
+        .map(|v| format!("{:.3}", v))
+        .collect();
+
+    let forecast_labels_json = serde_json_vec_str(&forecast_labels);
+    let hist_labels_json = serde_json_vec_str(&hist_labels);
+    let all_labels_json = serde_json_vec_str(&all_labels);
+    let price_median_json = serde_json_vec_f64(&result.price_median);
+    let price_lower_json = serde_json_vec_f64(&result.price_lower);
+    let price_upper_json = serde_json_vec_f64(&result.price_upper);
+    let vol_point_json = serde_json_vec_f64(&result.vol_forecast);
+    let vol_lower_json = serde_json_vec_f64(&result.vol_lower);
+    let vol_upper_json = serde_json_vec_f64(&result.vol_upper);
+    let sampled_paths_json = serde_json_sampled_paths(&sampled_paths);
+    let hist_prices_json = serde_json_vec_f64(&terminal_prices);
+    let hist_bins_json = serde_json_histogram(&hist_bins);
+    let historical_prices_json = serde_json_vec_f64(historical_prices);
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -799,7 +736,7 @@ pub fn generate_dashboard(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fluxquant — {ticker} SARIMA-GARCH Forecast</title>
+<title>Fluxquant — {ticker} GBM-GARCH Forecast</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2"></script>
 <style>
@@ -911,18 +848,18 @@ pub fn generate_dashboard(
 </head>
 <body>
 <header>
-  <h1>{ticker} — SARIMA-GARCH Forecast</h1>
+  <h1>{ticker} — GBM-GARCH Forecast</h1>
   <div class="subtitle">Generated by fluxquant &middot; {n} week forecast &middot; {level_pct}% confidence</div>
-  <div class="model-badge">{sarima_order} + GARCH({gp},{gq})</div>
+  <div class="model-badge">GBM + GARCH({gp},{gq})</div>
 </header>
 
 <div class="dashboard">
   <div class="card">
-    <h3>Returns Forecast ({level}% CI)</h3>
-    <canvas id="returnsChart"></canvas>
+    <h3>Price Forecast ({level_pct}% CI)</h3>
+    <canvas id="priceChart"></canvas>
   </div>
   <div class="card">
-    <h3>Volatility Forecast ({level}% CI)</h3>
+    <h3>Volatility Forecast ({level_pct}% CI)</h3>
     <canvas id="volChart"></canvas>
   </div>
   <div class="card">
@@ -939,14 +876,14 @@ pub fn generate_dashboard(
       <tr><th>Metric</th><th>Value</th></tr>
       <tr><td>Mean Annual Return</td><td class="value {ret_cls}">{ret_pct}%</td></tr>
       <tr><td>Annual Volatility</td><td class="value neutral">{vol_pct}%</td></tr>
-      <tr><td>Sharpe Ratio</td><td class="value {sharpe_cls}">{sharpe}</td></tr>
+      <tr><td>Sharpe Ratio</td><td class="value {sharpe_cls}">{sharpe_val}</td></tr>
       <tr><td>Max Drawdown (worst)</td><td class="value negative">{dd_pct}%</td></tr>
       <tr><td>Median Drawdown</td><td class="value negative">{md_pct}%</td></tr>
-      <tr><td>Skewness</td><td class="value {skew_cls}">{skew}</td></tr>
-      <tr><td>Excess Kurtosis</td><td class="value {kurt_cls}">{kurt}</td></tr>
-      <tr><td>t-df Estimate</td><td class="value">{t_df}</td></tr>
-      <tr><td>SARIMA Order</td><td class="value">{sarima_order}</td></tr>
+      <tr><td>Skewness</td><td class="value {skew_cls}">{skew_val}</td></tr>
+      <tr><td>Excess Kurtosis</td><td class="value {kurt_cls}">{kurt_val}</td></tr>
+      <tr><td>t-df Estimate</td><td class="value">{t_df_val}</td></tr>
       <tr><td>GARCH Order</td><td class="value">({gp},{gq})</td></tr>
+      <tr><td>Drift (μ)</td><td class="value">{mu_drift_val}</td></tr>
       <tr><td>Bootstrap Paths</td><td class="value">{n_paths}</td></tr>
     </table>
   </div>
@@ -962,7 +899,7 @@ pub fn generate_dashboard(
 </div>
 
 <footer>
-  fluxquant by Utkarsh Gaikwad &middot; SARIMA-GARCH Filtered Bootstrap Simulation
+  fluxquant by Utkarsh Gaikwad &middot; GBM-GARCH Monte Carlo Simulation
 </footer>
 
 <script>
@@ -970,9 +907,9 @@ const DATA = {{
   forecastLabels: {forecast_labels_json},
   histLabels: {hist_labels_json},
   allLabels: {all_labels_json},
-  returnsPoint: {returns_point_json},
-  returnsLower: {returns_lower_json},
-  returnsUpper: {returns_upper_json},
+  priceMedian: {price_median_json},
+  priceLower: {price_lower_json},
+  priceUpper: {price_upper_json},
   volPoint: {vol_point_json},
   volLower: {vol_lower_json},
   volUpper: {vol_upper_json},
@@ -986,7 +923,7 @@ const DATA = {{
 const gridColor = 'rgba(255,255,255,0.06)';
 const tickColor = '#666';
 
-function baseOpts(title) {{
+function baseOpts() {{
   return {{
     responsive: true,
     maintainAspectRatio: true,
@@ -1002,18 +939,18 @@ function baseOpts(title) {{
   }};
 }}
 
-// ── Returns Chart ──
-new Chart(document.getElementById('returnsChart'), {{
+// ── Price Forecast Chart ──
+new Chart(document.getElementById('priceChart'), {{
   type: 'line',
   data: {{
     labels: DATA.forecastLabels,
     datasets: [
-      {{ label: 'Upper CI', data: DATA.returnsUpper, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: '+1', pointRadius: 0 }},
-      {{ label: 'Forecast', data: DATA.returnsPoint, borderColor: '#00d4aa', borderWidth: 2, backgroundColor: 'transparent', pointRadius: 0, tension: 0.3 }},
-      {{ label: 'Lower CI', data: DATA.returnsLower, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: false, pointRadius: 0 }}
+      {{ label: 'Upper CI', data: DATA.priceUpper, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: '+1', pointRadius: 0 }},
+      {{ label: 'Median Price', data: DATA.priceMedian, borderColor: '#00d4aa', borderWidth: 2, backgroundColor: 'transparent', pointRadius: 0, tension: 0.3 }},
+      {{ label: 'Lower CI', data: DATA.priceLower, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: false, pointRadius: 0 }}
     ]
   }},
-  options: baseOpts('Returns')
+  options: baseOpts()
 }});
 
 // ── Volatility Chart ──
@@ -1027,7 +964,7 @@ new Chart(document.getElementById('volChart'), {{
       {{ label: 'Lower CI', data: DATA.volLower, borderColor: 'transparent', backgroundColor: 'rgba(124,92,252,0.15)', fill: false, pointRadius: 0 }}
     ]
   }},
-  options: baseOpts('Volatility')
+  options: baseOpts()
 }});
 
 // ── Fan Chart ──
@@ -1044,7 +981,7 @@ new Chart(document.getElementById('fanChart'), {{
     labels: DATA.forecastLabels,
     datasets: fanDatasets
   }},
-  options: {{ ...baseOpts('Paths'), plugins: {{ ...baseOpts('Paths').plugins, legend: {{ display: false }} }} }}
+  options: {{ ...baseOpts(), plugins: {{ ...baseOpts().plugins, legend: {{ display: false }} }} }}
 }});
 
 // ── Histogram ──
@@ -1061,12 +998,12 @@ new Chart(document.getElementById('histChart'), {{
     }}]
   }},
   options: {{
-    ...baseOpts('Distribution'),
-    plugins: {{ ...baseOpts('Distribution').plugins, legend: {{ display: false }} }},
+    ...baseOpts(),
+    plugins: {{ ...baseOpts().plugins, legend: {{ display: false }} }},
     scales: {{
-      ...baseOpts('Distribution').scales,
-      x: {{ ...baseOpts('Distribution').scales.x, title: {{ display: true, text: 'Terminal Price', color: '#888' }} }},
-      y: {{ ...baseOpts('Distribution').scales.y, title: {{ display: true, text: 'Frequency', color: '#888' }} }}
+      ...baseOpts().scales,
+      x: {{ ...baseOpts().scales.x, title: {{ display: true, text: 'Terminal Price', color: '#888' }} }},
+      y: {{ ...baseOpts().scales.y, title: {{ display: true, text: 'Frequency', color: '#888' }} }}
     }}
   }}
 }});
@@ -1075,69 +1012,51 @@ new Chart(document.getElementById('histChart'), {{
 </html>"#,
         ticker = ticker,
         n = n,
-        level = (result.returns_forecast.level * 100.0).round() as usize,
-        sarima_order = result.sarima_order_selected,
-        gp = result.garch_order_selected.0,
-        gq = result.garch_order_selected.1,
+        level_pct = level_pct,
+        gp = gp,
+        gq = gq,
         n_paths = result.bootstrap_paths.len(),
-        ret_pct = format!("{:.2}", result.summary.mean_annual_return * 100.0),
-        vol_pct = format!("{:.2}", result.summary.annual_volatility * 100.0),
-        sharpe = format!("{:.3}", result.summary.sharpe_ratio),
-        dd_pct = format!("{:.2}", result.summary.max_drawdown * 100.0),
-        md_pct = format!("{:.2}", result.summary.median_drawdown * 100.0),
-        skew = format!("{:.4}", result.summary.skewness),
-        kurt = format!("{:.4}", result.summary.kurtosis),
-        t_df = format!("{:.2}", result.summary.t_df_estimate),
-        rp0 = format!("{:.2}", result.summary.return_percentiles[0] * 100.0),
-        rp1 = format!("{:.2}", result.summary.return_percentiles[1] * 100.0),
-        rp2 = format!("{:.2}", result.summary.return_percentiles[2] * 100.0),
-        rp3 = format!("{:.2}", result.summary.return_percentiles[3] * 100.0),
-        rp4 = format!("{:.2}", result.summary.return_percentiles[4] * 100.0),
-        vp0 = format!("{:.2}", result.summary.volatility_percentiles[0] * 100.0),
-        vp1 = format!("{:.2}", result.summary.volatility_percentiles[1] * 100.0),
-        vp2 = format!("{:.2}", result.summary.volatility_percentiles[2] * 100.0),
-        vp3 = format!("{:.2}", result.summary.volatility_percentiles[3] * 100.0),
-        vp4 = format!("{:.2}", result.summary.volatility_percentiles[4] * 100.0),
-        sp0 = format!("{:.3}", result.summary.sharpe_percentiles[0]),
-        sp1 = format!("{:.3}", result.summary.sharpe_percentiles[1]),
-        sp2 = format!("{:.3}", result.summary.sharpe_percentiles[2]),
-        sp3 = format!("{:.3}", result.summary.sharpe_percentiles[3]),
-        sp4 = format!("{:.3}", result.summary.sharpe_percentiles[4]),
-        ret_cls = if result.summary.mean_annual_return >= 0.0 {
-            "positive"
-        } else {
-            "negative"
-        },
-        sharpe_cls = if result.summary.sharpe_ratio >= 0.5 {
-            "positive"
-        } else if result.summary.sharpe_ratio >= 0.0 {
-            "neutral"
-        } else {
-            "negative"
-        },
-        skew_cls = if result.summary.skewness.abs() < 0.5 {
-            "neutral"
-        } else {
-            "negative"
-        },
-        kurt_cls = if result.summary.kurtosis > 1.0 {
-            "negative"
-        } else {
-            "neutral"
-        },
-        forecast_labels_json = serde_json_vec_str(&forecast_labels),
-        hist_labels_json = serde_json_vec_str(&hist_labels),
-        all_labels_json = serde_json_vec_str(&all_labels),
-        returns_point_json = serde_json_vec_f64(&result.returns_forecast.point),
-        returns_lower_json = serde_json_vec_f64(&result.returns_forecast.lower),
-        returns_upper_json = serde_json_vec_f64(&result.returns_forecast.upper),
-        vol_point_json = serde_json_vec_f64(&result.volatility_forecast.point),
-        vol_lower_json = serde_json_vec_f64(&result.volatility_forecast.lower),
-        vol_upper_json = serde_json_vec_f64(&result.volatility_forecast.upper),
-        sampled_paths_json = serde_json_sampled_paths(&sampled_paths),
-        hist_prices_json = serde_json_vec_f64(&terminal_prices),
-        hist_bins_json = serde_json_histogram(&hist_bins),
-        historical_prices_json = serde_json_vec_f64(historical_prices),
+        ret_pct = ret_pct,
+        vol_pct = vol_pct,
+        sharpe_val = sharpe_val,
+        dd_pct = dd_pct,
+        md_pct = md_pct,
+        skew_val = skew_val,
+        kurt_val = kurt_val,
+        t_df_val = t_df_val,
+        mu_drift_val = mu_drift_val,
+        ret_cls = ret_cls,
+        sharpe_cls = sharpe_cls,
+        skew_cls = skew_cls,
+        kurt_cls = kurt_cls,
+        rp0 = rp[0],
+        rp1 = rp[1],
+        rp2 = rp[2],
+        rp3 = rp[3],
+        rp4 = rp[4],
+        vp0 = vp[0],
+        vp1 = vp[1],
+        vp2 = vp[2],
+        vp3 = vp[3],
+        vp4 = vp[4],
+        sp0 = sp[0],
+        sp1 = sp[1],
+        sp2 = sp[2],
+        sp3 = sp[3],
+        sp4 = sp[4],
+        forecast_labels_json = forecast_labels_json,
+        hist_labels_json = hist_labels_json,
+        all_labels_json = all_labels_json,
+        price_median_json = price_median_json,
+        price_lower_json = price_lower_json,
+        price_upper_json = price_upper_json,
+        vol_point_json = vol_point_json,
+        vol_lower_json = vol_lower_json,
+        vol_upper_json = vol_upper_json,
+        sampled_paths_json = sampled_paths_json,
+        hist_prices_json = hist_prices_json,
+        hist_bins_json = hist_bins_json,
+        historical_prices_json = historical_prices_json,
     );
 
     Ok(html)
@@ -1207,6 +1126,7 @@ fn serde_json_histogram(h: &Histogram) -> String {
 }
 
 // ─── Utility Functions ────────────────────────────────────────────────────────
+
 fn normal_inv_cdf(p: f64) -> f64 {
     if p <= 0.0 {
         return f64::NEG_INFINITY;
@@ -1217,41 +1137,48 @@ fn normal_inv_cdf(p: f64) -> f64 {
     if (p - 0.5).abs() < 1e-10 {
         return 0.0;
     }
-
     let t = if p < 0.5 {
         (-2.0 * p.ln()).sqrt()
     } else {
         (-2.0 * (1.0 - p).ln()).sqrt()
     };
-
     let c0 = 2.515517;
     let c1 = 0.802853;
     let c2 = 0.010328;
     let d1 = 1.432788;
     let d2 = 0.189269;
     let d3 = 0.001308;
-
     let result = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
     if p < 0.5 { -result } else { result }
 }
 
 // ─── Legacy API (backward compatible) ─────────────────────────────────────────
 
 /// High-performance simulation engine for quantitative finance.
+///
+/// Provides a builder-pattern interface for quick simulations and
+/// direct volatility fitting via GARCH.
 pub struct SimulationEngine {
+    /// Number of Monte Carlo paths to simulate.
     pub paths: usize,
 }
 
 impl SimulationEngine {
+    /// Create a new engine with default settings (1000 paths).
     pub fn new() -> Self {
         Self { paths: 1000 }
     }
 
+    /// Create a builder for configuring the engine.
     pub fn builder() -> SimulationEngineBuilder {
         SimulationEngineBuilder { paths: 1000 }
     }
 
+    /// Run a Monte Carlo simulation with the configured path count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FluxError::SimulationError`] if path count is zero.
     pub fn run_monte_carlo(&self) -> Result<(), FluxError> {
         if self.paths == 0 {
             return Err(FluxError::SimulationError(
@@ -1261,6 +1188,11 @@ impl SimulationEngine {
         Ok(())
     }
 
+    /// Fit a GARCH(1,1) model and return annualized volatility.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FluxError::VolatilityError`] if data is empty or fitting fails.
     pub fn fit_volatility(&self, data: &[f64]) -> Result<f64, FluxError> {
         if data.is_empty() {
             return Err(FluxError::VolatilityError("Dataset is empty".into()));
@@ -1303,16 +1235,19 @@ impl Default for SimulationEngine {
     }
 }
 
+/// Builder for configuring a [`SimulationEngine`].
 pub struct SimulationEngineBuilder {
     paths: usize,
 }
 
 impl SimulationEngineBuilder {
+    /// Set the number of Monte Carlo paths.
     pub fn paths(mut self, paths: usize) -> Self {
         self.paths = paths;
         self
     }
 
+    /// Build the configured [`SimulationEngine`].
     pub fn build(self) -> SimulationEngine {
         SimulationEngine { paths: self.paths }
     }
@@ -1363,21 +1298,46 @@ mod tests {
     }
 
     #[test]
+    fn garch_optimization_basic() {
+        let returns: Vec<f64> = (0..100)
+            .map(|i| {
+                let i = i as f64;
+                (i * 0.3).sin() * 0.02 + (i * 0.1).cos() * 0.01
+            })
+            .collect();
+        let result = optimize_garch(&returns, 2, 2);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn garch_optimization_too_few() {
+        let returns = vec![0.01; 10];
+        assert!(optimize_garch(&returns, 1, 2).is_err());
+    }
+
+    #[test]
     fn normal_inv_cdf_sanity() {
         let p50 = normal_inv_cdf(0.5);
-        assert!((p50).abs() < 0.001, "z(0.5) should be ~0, got {p50}");
-
+        assert!(p50.abs() < 0.001);
         let p975 = normal_inv_cdf(0.975);
-        assert!(
-            (p975 - 1.96).abs() < 0.01,
-            "z(0.975) should be ~1.96, got {p975}"
-        );
-
+        assert!((p975 - 1.96).abs() < 0.01);
         let p025 = normal_inv_cdf(0.025);
-        assert!(
-            (p025 + 1.96).abs() < 0.01,
-            "z(0.025) should be ~-1.96, got {p025}"
-        );
+        assert!((p025 + 1.96).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_percentiles_works() {
+        let mut data = vec![1.0, 2.0, 3.0, 4.0];
+        let p = compute_percentiles(&mut data, &[0.5]);
+        assert!((p[0] - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn max_drawdown_calculation() {
+        let path = vec![1.0, 1.2, 1.1, 1.3, 0.9, 1.0];
+        let dd = compute_max_drawdown(&path);
+        assert!(dd < 0.0);
+        assert!((dd - (-0.3077)).abs() < 0.01);
     }
 
     #[test]
@@ -1389,38 +1349,24 @@ mod tests {
     }
 
     #[test]
-    fn max_drawdown_calculation() {
-        let path = vec![1.0, 1.2, 1.1, 1.3, 0.9, 1.0];
-        let dd = compute_max_drawdown(&path);
-        assert!(dd < 0.0, "Max drawdown should be negative");
-        assert!((dd - (-0.3077)).abs() < 0.01, "Expected ~-30.8%, got {dd}");
-    }
-
-    #[test]
     fn bootstrap_produces_paths() {
-        let residuals = vec![0.1, -0.1, 0.05, -0.05, 0.15, -0.15, 0.08, -0.08];
+        let standardized = vec![0.1, -0.1, 0.05, -0.05, 0.15, -0.15, 0.08, -0.08];
         let vol_forecast = vec![0.02; 10];
-        let paths = run_parallel_bootstrap(&residuals, 0.001, &vol_forecast, 10, 100, Some(42));
+        let paths = run_gbm_bootstrap(&standardized, 0.001, &vol_forecast, 10, 100, Some(42));
         assert_eq!(paths.len(), 100);
         assert_eq!(paths[0].len(), 11); // 10 weeks + initial price
-        assert!(paths[0][0] == 1.0); // starts at 1.0
+        assert!((paths[0][0] - 1.0).abs() < 1e-10); // starts at 1.0
     }
 
     #[test]
     fn dashboard_generation() {
         let result = SimulationResult {
-            returns_forecast: ForecastResult {
-                point: vec![0.01, 0.02, 0.03],
-                lower: vec![-0.01, 0.0, 0.01],
-                upper: vec![0.03, 0.04, 0.05],
-                level: 0.95,
-            },
-            volatility_forecast: ForecastResult {
-                point: vec![0.02, 0.02, 0.02],
-                lower: vec![0.015, 0.015, 0.015],
-                upper: vec![0.025, 0.025, 0.025],
-                level: 0.95,
-            },
+            price_median: vec![1.0, 1.01, 1.02],
+            price_lower: vec![0.98, 0.97, 0.96],
+            price_upper: vec![1.02, 1.04, 1.06],
+            vol_forecast: vec![0.02, 0.02, 0.02],
+            vol_lower: vec![0.015, 0.015, 0.015],
+            vol_upper: vec![0.025, 0.025, 0.025],
             bootstrap_paths: vec![vec![1.0, 1.01, 1.02], vec![1.0, 0.99, 1.0]],
             summary: SummaryStats {
                 mean_annual_return: 0.08,
@@ -1436,11 +1382,16 @@ mod tests {
                 sharpe_percentiles: [-0.3, 0.1, 0.4, 0.7, 1.2],
             },
             garch_order_selected: (1, 1),
-            sarima_order_selected: "(1,1,1)(1,1,1)[52]".into(),
+            mu_drift: 0.001,
         };
         let html = generate_dashboard("AAPL", &result, &[100.0, 101.0, 102.0]).unwrap();
         assert!(html.contains("AAPL"));
         assert!(html.contains("chart.js"));
-        assert!(html.contains("returnsChart"));
+        assert!(html.contains("priceChart"));
+        assert!(html.contains("volChart"));
+        assert!(html.contains("fanChart"));
+        assert!(html.contains("histChart"));
+        assert!(html.contains("Summary Statistics"));
+        assert!(html.contains("Distribution Percentiles"));
     }
 }

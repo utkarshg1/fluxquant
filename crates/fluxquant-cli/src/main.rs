@@ -1,28 +1,42 @@
+//! # fluxquant-cli
+//!
+//! Command-line interface for the fluxquant GBM-GARCH quantitative finance engine.
+//!
+//! Provides three subcommands:
+//!
+//! - **`init`** — Interactive workspace setup wizard
+//! - **`gen`** — Generate a default YAML simulation template
+//! - **`run`** — Fetch market data and run a full GBM-GARCH simulation
+//!
+//! ## Quick Start
+//!
+//! ```bash
+//! fluxquant-cli init                    # First-time setup
+//! fluxquant-cli run --ticker AAPL       # Run simulation with defaults
+//! fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1
+//! ```
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use fluxquant::{GarchOrder, SarimaOrder, SimulationConfig, generate_dashboard, run_sarima_garch};
+use fluxquant::{GarchOrder, SimulationConfig, generate_dashboard, run_gbm_garch};
 
-const BANNER: &str = r#"
-╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                      ║
-║  ███████╗██╗     ██╗   ██╗██╗  ██╗ ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗      ║
-║  ██╔════╝██║     ██║   ██║╚██╗██╔╝██╔═══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝      ║
-║  █████╗  ██║     ██║   ██║ ╚███╔╝ ██║   ██║██║   ██║███████║██╔██╗ ██║   ██║         ║
-║  ██╔══╝  ██║     ██║   ██║ ██╔██╗ ██║▄▄ ██║██║   ██║██╔══██║██║╚██╗██║   ██║         ║
-║  ██║     ███████╗╚██████╔╝██╔╝ ██╗╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║         ║
-║  ╚═╝     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝         ║
-║                                                                                      ║
-║                           [ fluxquant by Utkarsh Gaikwad ]                           ║
-║                                                                                      ║
-╚══════════════════════════════════════════════════════════════════════════════════════╝
+const FLUXQUANT_BANNER: &str = r#"
+╔═══════════════════════════════════════════════════════════════╗
+║  ███████╗██╗████████╗██╗  ██╗     ██████╗ ███████╗███╗   ██╗║
+║  ██╔════╝██║╚══██╔══╝██║  ██║    ██╔═══██╗██╔════╝████╗  ██║║
+║  █████╗  ██║   ██║   ███████║    ██║   ██║███████╗██╔██╗ ██║║
+║  ██╔══╝  ██║   ██║   ██╔══██║    ██║   ██║╚════██║██║╚██╗██║║
+║  ██║     ██║   ██║   ██║  ██║    ╚██████╔╝███████║██║ ╚████║║
+║  ╚═╝     ╚═╝   ╚═╝   ╚═╝  ╚═╝     ╚═════╝ ╚══════╝╚═╝  ╚═══╝║
+║                                                               ║
+║            GBM-GARCH Simulation Engine                        ║
+╚═══════════════════════════════════════════════════════════════╝
 "#;
 
-const DEFAULT_TEMPLATE: &str = r#"# fluxquant SARIMA-GARCH simulation configuration
+const DEFAULT_TEMPLATE: &str = r#"# fluxquant GBM-GARCH simulation configuration
 simulation:
   ticker: "AAPL"
   forecast_years: 5
@@ -30,31 +44,16 @@ simulation:
   confidence_level: 0.95
   n_bootstrap: 10000
 
-sarima:
-  mode: "auto"
-  seasonal_period: 52
-  # manual orders (ignored when mode=auto):
-  # p: 1
-  # d: 1
-  # q: 1
-  # P: 1
-  # D: 1
-  # Q: 1
-
 garch:
   mode: "optimize"
   max_p: 3
   max_q: 3
-  # when mode=fixed:
-  # p: 1
-  # q: 1
 
 output:
   save_dashboard: true
   dashboard_path: "./results/dashboard.html"
 "#;
 
-// ── Persistent config (stored at OS-native config path) ─────────────
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct FluxConfig {
     workspace: PathBuf,
@@ -75,388 +74,97 @@ impl Default for FluxConfig {
     }
 }
 
-/// OS-native config path: ~/.config/fluxquant/ (Linux), AppData\Roaming\fluxquant\ (Win), etc.
 fn flux_config_path() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_default()
         .join("fluxquant")
         .join("config.yaml")
 }
 
-fn load_flux_config() -> Option<FluxConfig> {
-    let path = flux_config_path();
-    if !path.exists() {
+fn load_flux() -> Option<FluxConfig> {
+    let p = flux_config_path();
+    if !p.exists() {
         return None;
     }
-    let contents = std::fs::read_to_string(&path).ok()?;
-    serde_yaml::from_str(&contents).ok()
+    serde_yaml::from_str(&std::fs::read_to_string(p).ok()?).ok()
 }
 
-fn save_flux_config(cfg: &FluxConfig) -> Result<()> {
-    let path = flux_config_path();
-    if let Some(parent) = path.parent() {
+fn save_flux(cfg: &FluxConfig) -> Result<()> {
+    let p = flux_config_path();
+    if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let yaml = serde_yaml::to_string(cfg)?;
-    std::fs::write(&path, yaml)?;
+    std::fs::write(&p, serde_yaml::to_string(cfg)?)?;
     Ok(())
 }
 
-/// Create workspace subdirectories and copy the default simulation template.
-fn ensure_workspace(cfg: &FluxConfig) -> Result<()> {
-    let configs_dir = cfg.workspace.join("configs");
-    let results_dir = cfg.workspace.join("results");
-
-    println!(
-        "\n  {} Creating workspace at {}...",
-        style("→").cyan(),
-        style(cfg.workspace.display()).cyan().bold()
-    );
-
-    std::fs::create_dir_all(&configs_dir)?;
-    println!("    {}/", style("configs").green());
-
-    std::fs::create_dir_all(&results_dir)?;
-    println!("    {}/", style("results").green());
-
-    let template_path = configs_dir.join("simulation.yaml");
-    if !template_path.exists() {
-        std::fs::write(&template_path, DEFAULT_TEMPLATE)?;
-        println!("    {}", style("simulation.yaml").green());
-    }
-
-    Ok(())
-}
-
-/// Read a line of input from stdin, returning trimmed string.
-fn prompt_input(default: &str) -> Result<String> {
+fn prompt(default: &str) -> Result<String> {
     io::stdout().flush()?;
     let mut buf = String::new();
     io::stdin().read_line(&mut buf)?;
-    let trimmed = buf.trim().to_string();
-    Ok(if trimmed.is_empty() {
-        default.to_string()
+    Ok(if buf.trim().is_empty() {
+        default.into()
     } else {
-        trimmed
+        buf.trim().into()
     })
 }
 
-/// Display the resolved run configuration summary.
-fn show_run_config(
-    ticker: &str,
-    forecast_years: u32,
-    hist_years: u32,
-    conf_level: f64,
-    n_bootstrap: usize,
-    sarima: &str,
-    garch: &str,
-    output: &Path,
-) {
-    println!("\n{}", style("═".repeat(55)).dim());
-    println!("  {}", style("Simulation Configuration").cyan().bold());
-    println!("{}", style("═".repeat(55)).dim());
-
-    println!(
-        "  {:<20} {}",
-        style("Ticker:").dim(),
-        style(ticker).cyan().bold()
-    );
-    println!(
-        "  {:<20} {} {}",
-        style("Forecast:").dim(),
-        style(format!("{forecast_years} years")).cyan().bold(),
-        style(format!("({} weeks)", forecast_years * 52)).dim()
-    );
-    println!(
-        "  {:<20} {}",
-        style("History:").dim(),
-        style(format!("{hist_years} years")).cyan().bold()
-    );
-    println!(
-        "  {:<20} {}",
-        style("Confidence:").dim(),
-        style(format!("{}%", (conf_level * 100.0) as usize))
-            .cyan()
-            .bold()
-    );
-    println!(
-        "  {:<20} {}",
-        style("Bootstrap paths:").dim(),
-        style(format!("{n_bootstrap}")).cyan().bold()
-    );
-    println!(
-        "  {:<20} {}",
-        style("SARIMA:").dim(),
-        style(sarima).cyan().bold()
-    );
-    println!(
-        "  {:<20} {}",
-        style("GARCH:").dim(),
-        style(garch).cyan().bold()
-    );
-    println!(
-        "  {:<20} {}",
-        style("Output:").dim(),
-        style(output.display()).cyan().bold()
-    );
-    println!("{}", style("═".repeat(55)).dim());
-}
-
-/// Interactive parameter editor. Prompts user for each value with defaults.
-/// Returns (ticker, forecast_years, hist_years, conf_level, n_bootstrap, sarima_str, garch_str, output, sarima_order, garch_order).
-fn prompt_run_config(
-    ticker: &str,
-    forecast_years: u32,
-    hist_years: u32,
-    conf_level: f64,
-    n_bootstrap: usize,
-    sarima: &str,
-    garch: &str,
-    garch_max_p: usize,
-    garch_max_q: usize,
-    garch_p: Option<usize>,
-    garch_q: Option<usize>,
-    seasonal_period: usize,
-    output: &Path,
-) -> Result<(
-    String,
-    u32,
-    u32,
-    f64,
-    usize,
-    String,
-    String,
-    PathBuf,
-    SarimaOrder,
-    GarchOrder,
-)> {
-    println!(
-        "\n  {}",
-        style("Enter new values (press Enter to keep default):")
-            .cyan()
-            .bold()
-    );
-    println!();
-
-    print!("  {} [{}]: ", style("Ticker").bold(), style(ticker).dim());
-    let new_ticker = prompt_input(ticker)?.to_uppercase();
-
-    print!(
-        "  {} [{}]: ",
-        style("Forecast years").bold(),
-        style(forecast_years.to_string()).dim()
-    );
-    let new_years: u32 = prompt_input(&forecast_years.to_string())?
-        .parse()
-        .unwrap_or(forecast_years);
-
-    print!(
-        "  {} [{}]: ",
-        style("History years").bold(),
-        style(hist_years.to_string()).dim()
-    );
-    let new_hist: u32 = prompt_input(&hist_years.to_string())?
-        .parse()
-        .unwrap_or(hist_years);
-
-    print!(
-        "  {} [{}]: ",
-        style("Confidence").bold(),
-        style(conf_level.to_string()).dim()
-    );
-    let new_conf: f64 = prompt_input(&conf_level.to_string())?
-        .parse()
-        .unwrap_or(conf_level);
-
-    print!(
-        "  {} [{}]: ",
-        style("Bootstrap paths").bold(),
-        style(n_bootstrap.to_string()).dim()
-    );
-    let new_paths: usize = prompt_input(&n_bootstrap.to_string())?
-        .parse()
-        .unwrap_or(n_bootstrap);
-
-    print!(
-        "  {} [{}]: ",
-        style("SARIMA mode").bold(),
-        style(sarima).dim()
-    );
-    let new_sarima = prompt_input(sarima)?;
-
-    let new_sarima_period = if new_sarima == "manual" {
-        print!(
-            "  {} [{}]: ",
-            style("Seasonal period").bold(),
-            style(seasonal_period.to_string()).dim()
-        );
-        prompt_input(&seasonal_period.to_string())?
-            .parse()
-            .unwrap_or(seasonal_period)
-    } else {
-        seasonal_period
-    };
-
-    print!(
-        "  {} [{}]: ",
-        style("GARCH mode").bold(),
-        style(garch).dim()
-    );
-    let new_garch = prompt_input(garch)?;
-
-    let (_new_garch_order, new_garch_max_p, new_garch_max_q, new_garch_p, new_garch_q) =
-        if new_garch == "fixed" {
-            let p = garch_p.unwrap_or(1);
-            let q = garch_q.unwrap_or(1);
-            print!(
-                "  {} [{}]: ",
-                style("GARCH p").bold(),
-                style(p.to_string()).dim()
-            );
-            let fp: usize = prompt_input(&p.to_string())?.parse().unwrap_or(p);
-            print!(
-                "  {} [{}]: ",
-                style("GARCH q").bold(),
-                style(q.to_string()).dim()
-            );
-            let fq: usize = prompt_input(&q.to_string())?.parse().unwrap_or(q);
-            (Some((fp, fq)), garch_max_p, garch_max_q, Some(fp), Some(fq))
-        } else {
-            let mp = garch_max_p;
-            let mq = garch_max_q;
-            print!(
-                "  {} [{}]: ",
-                style("Max GARCH p").bold(),
-                style(mp.to_string()).dim()
-            );
-            let nmp: usize = prompt_input(&mp.to_string())?.parse().unwrap_or(mp);
-            print!(
-                "  {} [{}]: ",
-                style("Max GARCH q").bold(),
-                style(mq.to_string()).dim()
-            );
-            let nmq: usize = prompt_input(&mq.to_string())?.parse().unwrap_or(mq);
-            (None, nmp, nmq, None, None)
-        };
-
-    print!(
-        "  {} [{}]: ",
-        style("Output").bold(),
-        style(output.display()).dim()
-    );
-    let new_output_str = prompt_input(&output.to_string_lossy())?;
-    let new_output = PathBuf::from(&new_output_str);
-
-    // Build final orders
-    let sarima_order = match new_sarima.as_str() {
-        "manual" => SarimaOrder::Manual {
-            p: 1,
-            d: 1,
-            q: 1,
-            P: 1,
-            D: 1,
-            Q: 1,
-            s: new_sarima_period,
-        },
-        _ => SarimaOrder::Auto {
-            seasonal_period: new_sarima_period,
-        },
-    };
-
-    let garch_order = match new_garch.as_str() {
-        "fixed" => GarchOrder::Manual {
-            p: new_garch_p.unwrap_or(1),
-            q: new_garch_q.unwrap_or(1),
-        },
-        _ => GarchOrder::Auto {
-            max_p: new_garch_max_p,
-            max_q: new_garch_max_q,
-        },
-    };
-
-    Ok((
-        new_ticker,
-        new_years,
-        new_hist,
-        new_conf,
-        new_paths,
-        new_sarima,
-        new_garch,
-        new_output,
-        sarima_order,
-        garch_order,
-    ))
-}
-
-/// Interactive setup wizard — prompts user and returns a new FluxConfig.
-fn setup_wizard() -> Result<FluxConfig> {
-    println!("\n{}", style("fluxquant first-time setup").cyan().bold());
-    println!("{}", style("═".repeat(50)).dim());
-    println!("\n  {} Workspace folder path", style("1/4").cyan().bold());
-    println!(
-        "    {}",
-        style("Where dashboards and configs will be stored.").dim()
-    );
-
-    let default_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_workspace = default_home.join("fluxquant-workspace");
-    print!("    [{}]: ", style(default_workspace.display()).dim());
-    let input = prompt_input(&default_workspace.to_string_lossy())?;
-    let workspace = PathBuf::from(&input);
-
-    // ── Ticker ──
-    println!("\n  {} Default ticker symbol", style("2/4").cyan().bold());
-    print!("    [{}]: ", style("AAPL").dim());
-    let input = prompt_input("AAPL")?;
-    let ticker = input.to_uppercase();
-
-    // ── Confidence ──
-    println!(
-        "\n  {} Default confidence level",
-        style("3/4").cyan().bold()
-    );
-    print!("    [{}]: ", style("0.95").dim());
-    let input = prompt_input("0.95")?;
-    let confidence: f64 = input.parse().unwrap_or(0.95);
-
-    // ── Bootstrap paths ──
-    println!("\n  {} Default bootstrap paths", style("4/4").cyan().bold());
-    print!("    [{}]: ", style("10000").dim());
-    let input = prompt_input("10000")?;
-    let bootstrap: usize = input.parse().unwrap_or(10000);
-
+fn setup() -> Result<FluxConfig> {
+    let dw = dirs::home_dir()
+        .unwrap_or_default()
+        .join("fluxquant-workspace");
+    print!("Workspace [{}]: ", dw.display());
+    let w = PathBuf::from(prompt(&dw.to_string_lossy())?);
     let cfg = FluxConfig {
-        workspace,
-        default_ticker: ticker,
-        default_confidence: confidence,
-        default_bootstrap_paths: bootstrap,
+        workspace: w,
+        ..Default::default()
     };
-
-    // Create workspace dirs
-    ensure_workspace(&cfg)?;
-
-    // Save config
-    save_flux_config(&cfg)?;
-    println!(
-        "\n  {} Config saved to {}",
-        style("✓").green().bold(),
-        style(flux_config_path().display()).cyan().underlined()
-    );
-    println!(
-        "\n  {} Setup complete! Run {} to start.\n",
-        style("✓").green().bold(),
-        style("fluxquant-cli run").cyan().bold()
-    );
-
+    for d in [
+        &cfg.workspace.join("configs"),
+        &cfg.workspace.join("results"),
+    ] {
+        std::fs::create_dir_all(d)?;
+    }
+    save_flux(&cfg)?;
+    println!("Config saved");
     Ok(cfg)
 }
 
+#[derive(serde::Deserialize)]
+struct YSim {
+    ticker: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct YGarch {
+    mode: Option<String>,
+    max_p: Option<usize>,
+    max_q: Option<usize>,
+    p: Option<usize>,
+    q: Option<usize>,
+}
+
+#[derive(serde::Deserialize)]
+struct YConfig {
+    simulation: Option<YSim>,
+    garch: Option<YGarch>,
+}
+
+/// GBM-GARCH quantitative finance simulation engine.
+///
+/// Run Monte Carlo simulations with GARCH volatility modeling on real market data
+/// fetched from Yahoo Finance. Outputs an interactive HTML dashboard with charts,
+/// summary statistics, and risk analytics.
 #[derive(Parser)]
-#[command(name = "fluxquant")]
 #[command(
-    about = "High-performance quantitative finance CLI with SARIMA-GARCH simulation",
-    version,
-    author
+    name = "fluxquant-cli",
+    about = "GBM-GARCH quantitative finance simulation engine",
+    long_about = "FluxQuant CLI — Monte Carlo simulation with GARCH volatility modeling.\n\n\
+        Fetches historical market data from Yahoo Finance, fits a GARCH(p,q) model \
+        for volatility estimation, and runs GBM bootstrap simulations to produce \
+        price forecasts, fan charts, and risk analytics.\n\n\
+        Outputs a self-contained HTML dashboard with interactive Chart.js visualizations.",
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -465,608 +173,177 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run SARIMA-GARCH simulation with bootstrap confidence intervals
+    /// Run a GBM-GARCH simulation on a ticker.
     Run {
-        /// Ticker symbol (e.g. AAPL, MSFT, TSLA)
-        #[arg(short, long)]
+        /// Ticker symbol (e.g. AAPL, SPY, BTC-USD).
         ticker: Option<String>,
-
-        /// Forecast horizon in years
-        #[arg(short = 'y', long, default_value = "5")]
-        years: u32,
-
-        /// Years of historical data to fetch
-        #[arg(short = 'H', long, default_value = "3")]
-        history_years: u32,
-
-        /// Confidence level (e.g. 0.95 for 95%)
-        #[arg(long, default_value = "0.95")]
-        confidence: f64,
-
-        /// Number of bootstrap paths
-        #[arg(short = 'n', long, default_value = "10000")]
-        paths: usize,
-
-        /// Use AutoARIMA (default) or manual SARIMA orders
-        #[arg(long, default_value = "auto")]
-        sarima: String,
-
-        /// GARCH mode: optimize (grid search + BIC) or fixed
-        #[arg(long, default_value = "optimize")]
-        garch: String,
-
-        /// Max GARCH p for grid search (when garch=optimize)
-        #[arg(long, default_value = "3")]
-        garch_max_p: usize,
-
-        /// Max GARCH q for grid search (when garch=optimize)
-        #[arg(long, default_value = "3")]
-        garch_max_q: usize,
-
-        /// Fixed GARCH p (when garch=fixed)
-        #[arg(long)]
+        /// Forecast horizon in years (default: 5).
+        years: Option<u32>,
+        /// Years of historical data to fetch (default: 3).
+        history_years: Option<u32>,
+        /// Confidence level for intervals (default: 0.95).
+        confidence: Option<f64>,
+        /// Number of bootstrap paths (default: 10000).
+        paths: Option<usize>,
+        /// Fixed GARCH p order (disables auto selection).
         garch_p: Option<usize>,
-
-        /// Fixed GARCH q (when garch=fixed)
-        #[arg(long)]
+        /// Fixed GARCH q order (requires --garch-p).
         garch_q: Option<usize>,
-
-        /// Seasonal period for SARIMA (default 52 for weekly)
-        #[arg(long, default_value = "52")]
-        seasonal_period: usize,
-
-        /// Output path for HTML dashboard (defaults to {workspace}/results/dashboard.html)
-        #[arg(short, long)]
+        /// Output path for the HTML dashboard.
         output: Option<PathBuf>,
-
-        /// YAML config file (overrides CLI args when present)
-        #[arg(short, long)]
+        /// Path to a YAML configuration file.
         config: Option<PathBuf>,
     },
-
-    /// Generate a default simulation YAML template
+    /// Generate a default YAML simulation template.
     Gen {
-        #[arg(short, long, default_value = "simulation.yaml")]
-        output: PathBuf,
+        /// Output path for the template file.
+        output: Option<PathBuf>,
     },
-
-    /// Set up workspace folder and default configuration
+    /// Interactive workspace setup wizard.
     Init,
-}
-
-#[derive(serde::Deserialize)]
-struct YamlConfig {
-    simulation: Option<YamlSimulation>,
-    sarima: Option<YamlSarima>,
-    garch: Option<YamlGarch>,
-}
-
-#[derive(serde::Deserialize)]
-struct YamlSimulation {
-    ticker: Option<String>,
-    forecast_years: Option<u32>,
-    history_years: Option<u32>,
-    confidence_level: Option<f64>,
-    n_bootstrap: Option<usize>,
-}
-
-#[derive(serde::Deserialize)]
-#[allow(non_snake_case)]
-struct YamlSarima {
-    mode: Option<String>,
-    seasonal_period: Option<usize>,
-    p: Option<usize>,
-    d: Option<usize>,
-    q: Option<usize>,
-    P: Option<usize>,
-    D: Option<usize>,
-    Q: Option<usize>,
-}
-
-#[derive(serde::Deserialize)]
-struct YamlGarch {
-    mode: Option<String>,
-    max_p: Option<usize>,
-    max_q: Option<usize>,
-    p: Option<usize>,
-    q: Option<usize>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("{}", style(BANNER).cyan().bold());
-    let cli = Cli::parse();
+    print!("{FLUXQUANT_BANNER}");
 
+    let cli = Cli::parse();
     match cli.command {
+        Commands::Init => {
+            if load_flux().is_some() {
+                print!("Overwrite? [y/N]: ");
+                io::stdout().flush()?;
+                let mut c = String::new();
+                io::stdin().read_line(&mut c)?;
+                if !c.trim().eq_ignore_ascii_case("y") {
+                    return Ok(());
+                }
+            }
+            setup()?;
+        }
+        Commands::Gen { output } => {
+            let f = load_flux().unwrap_or_default();
+            let p = output.unwrap_or_else(|| f.workspace.join("configs/simulation.yaml"));
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&p, DEFAULT_TEMPLATE)?;
+            println!("Template: {}", p.display());
+        }
         Commands::Run {
             ticker,
             years,
             history_years,
             confidence,
             paths,
-            sarima,
-            garch,
-            garch_max_p,
-            garch_max_q,
             garch_p,
             garch_q,
-            seasonal_period,
             output,
             config,
         } => {
-            // Load or create persistent config
-            let flux_cfg = load_flux_config().unwrap_or_else(|| {
-                println!(
-                    "\n  {} No configuration found. Starting setup wizard...",
-                    style("!").yellow().bold()
-                );
-                setup_wizard().expect("Setup wizard failed")
+            let flux = load_flux().unwrap_or_else(|| {
+                println!("No config. Run init.");
+                std::process::exit(1)
             });
 
-            // Load YAML config if provided (overrides CLI args)
-            let yaml = if let Some(config_path) = &config {
-                let contents = std::fs::read_to_string(config_path)?;
-                Some(serde_yaml::from_str::<YamlConfig>(&contents)?)
-            } else {
-                None
-            };
+            let fy = years.unwrap_or(5);
+            let hy = history_years.unwrap_or(3);
+            let conf = confidence.unwrap_or(0.95);
+            let nboot = paths.unwrap_or(10000);
 
-            let ticker = yaml
-                .as_ref()
-                .and_then(|y| y.simulation.as_ref())
-                .and_then(|s| s.ticker.clone())
-                .or(ticker)
-                .unwrap_or_else(|| flux_cfg.default_ticker.clone());
+            let mut garch_order = GarchOrder::Auto { max_p: 3, max_q: 3 };
+            let mut ticker = ticker.unwrap_or(flux.default_ticker.clone());
 
-            let forecast_years = yaml
-                .as_ref()
-                .and_then(|y| y.simulation.as_ref())
-                .and_then(|s| s.forecast_years)
-                .unwrap_or(years);
-
-            let hist_years = yaml
-                .as_ref()
-                .and_then(|y| y.simulation.as_ref())
-                .and_then(|s| s.history_years)
-                .unwrap_or(history_years);
-
-            let conf_level = yaml
-                .as_ref()
-                .and_then(|y| y.simulation.as_ref())
-                .and_then(|s| s.confidence_level)
-                .unwrap_or(confidence);
-
-            let n_bootstrap = yaml
-                .as_ref()
-                .and_then(|y| y.simulation.as_ref())
-                .and_then(|s| s.n_bootstrap)
-                .unwrap_or(paths);
-
-            let s_period = yaml
-                .as_ref()
-                .and_then(|y| y.sarima.as_ref())
-                .and_then(|s| s.seasonal_period)
-                .unwrap_or(seasonal_period);
-
-            let sarima_order = match yaml
-                .as_ref()
-                .and_then(|y| y.sarima.as_ref())
-                .and_then(|s| s.mode.as_deref())
-                .unwrap_or(&sarima)
-            {
-                "manual" => {
-                    let s = yaml.as_ref().and_then(|y| y.sarima.as_ref()).unwrap();
-                    SarimaOrder::Manual {
-                        p: s.p.unwrap_or(1),
-                        d: s.d.unwrap_or(1),
-                        q: s.q.unwrap_or(1),
-                        P: s.P.unwrap_or(1),
-                        D: s.D.unwrap_or(1),
-                        Q: s.Q.unwrap_or(1),
-                        s: s_period,
-                    }
+            if let Some(ref cp) = config {
+                let raw = std::fs::read_to_string(cp)?;
+                let parsed: YConfig = serde_yaml::from_str(&raw)?;
+                if let Some(ref g) = parsed.garch {
+                    garch_order = match g.mode.as_deref() {
+                        Some("fixed") => GarchOrder::Manual {
+                            p: g.p.unwrap_or(1),
+                            q: g.q.unwrap_or(1),
+                        },
+                        _ => GarchOrder::Auto {
+                            max_p: g.max_p.unwrap_or(3),
+                            max_q: g.max_q.unwrap_or(3),
+                        },
+                    };
                 }
-                _ => SarimaOrder::Auto {
-                    seasonal_period: s_period,
-                },
-            };
-
-            let garch_order = match yaml
-                .as_ref()
-                .and_then(|y| y.garch.as_ref())
-                .and_then(|s| s.mode.as_deref())
-                .unwrap_or(&garch)
-            {
-                "fixed" => {
-                    let ym = yaml.as_ref().and_then(|y| y.garch.as_ref());
-                    let p = ym.and_then(|s| s.p).or(garch_p).unwrap_or(1);
-                    let q = ym.and_then(|s| s.q).or(garch_q).unwrap_or(1);
-                    GarchOrder::Manual { p, q }
+                if let Some(ref s) = parsed.simulation
+                    && let Some(ref t) = s.ticker
+                {
+                    ticker = t.clone();
                 }
-                _ => {
-                    let ym = yaml.as_ref().and_then(|y| y.garch.as_ref());
-                    GarchOrder::Auto {
-                        max_p: ym.and_then(|s| s.max_p).unwrap_or(garch_max_p),
-                        max_q: ym.and_then(|s| s.max_q).unwrap_or(garch_max_q),
-                    }
-                }
-            };
+            }
 
-            // Resolve output path: CLI > workspace default
-            let output =
-                output.unwrap_or_else(|| flux_cfg.workspace.join("results").join("dashboard.html"));
+            if let Some(p) = garch_p {
+                garch_order = GarchOrder::Manual {
+                    p,
+                    q: garch_q.unwrap_or(1),
+                };
+            }
 
-            // ── Interactive confirmation ─────────────────────────────────
-            show_run_config(
-                &ticker,
-                forecast_years,
-                hist_years,
-                conf_level,
-                n_bootstrap,
-                &sarima,
-                &garch,
-                &output,
-            );
-
-            print!("\n  {} ", style("Run with these settings? [Y/n]:").bold());
-            io::stdout().flush()?;
-            let confirm = prompt_input("Y")?;
-
-            let (
-                ticker,
-                forecast_years,
-                hist_years,
-                conf_level,
-                n_bootstrap,
-                _sarima,
-                _garch,
-                output,
-                sarima_order,
-                garch_order,
-            ) = if confirm.trim().eq_ignore_ascii_case("n") {
-                prompt_run_config(
-                    &ticker,
-                    forecast_years,
-                    hist_years,
-                    conf_level,
-                    n_bootstrap,
-                    &sarima,
-                    &garch,
-                    garch_max_p,
-                    garch_max_q,
-                    garch_p,
-                    garch_q,
-                    s_period,
-                    &output,
-                )?
-            } else {
-                (
-                    ticker,
-                    forecast_years,
-                    hist_years,
-                    conf_level,
-                    n_bootstrap,
-                    sarima,
-                    garch,
-                    output,
-                    sarima_order,
-                    garch_order,
-                )
-            };
-
-            let config = SimulationConfig {
-                forecast_weeks: forecast_years as usize * 52,
-                confidence_level: conf_level,
-                sarima_order,
-                garch_order,
-                n_bootstrap,
-                seed: Some(42),
-            };
-
-            // ── Fetch historical data via yfinance-rs ─────────────────────
-            println!(
-                "\n{}",
-                style(format!(
-                    "Fetching {} weekly data ({} years)...",
-                    ticker, hist_years
-                ))
-                .bold()
-            );
-
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_style(
-                ProgressStyle::default_spinner()
-                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                    .template("{spinner:.green} {msg}")?,
-            );
-            spinner.set_message("Connecting to Yahoo Finance...");
-            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            println!("Fetching {ticker}...");
 
             let client = yfinance_rs::YfClient::default();
-            let yf_ticker = yfinance_rs::Ticker::new(&client, &ticker);
-
-            let range = match hist_years {
+            let yf = yfinance_rs::Ticker::new(&client, &ticker);
+            let range = match hy {
                 1 => yfinance_rs::Range::Y1,
                 2 => yfinance_rs::Range::Y2,
-                3..=4 => yfinance_rs::Range::Y5,
-                5 => yfinance_rs::Range::Y5,
                 _ => yfinance_rs::Range::Y5,
             };
-
-            let history = yf_ticker
+            let history = yf
                 .history(Some(range), Some(yfinance_rs::Interval::W1), false)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to fetch data: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("Fetch failed: {e}"))?;
 
-            spinner.finish_with_message(
-                style(format!("Fetched {} weekly bars", history.len()))
-                    .green()
-                    .to_string(),
-            );
-
-            // Extract closing prices and compute log returns
-            let closing_prices: Vec<f64> = history
+            let cp: Vec<f64> = history
                 .iter()
-                .filter_map(|bar| {
-                    let s = bar.ohlc.close.to_string();
-                    s.parse::<f64>().ok()
-                })
+                .filter_map(|b| b.ohlc.close.to_string().parse::<f64>().ok())
                 .collect();
-
-            if closing_prices.len() < 20 {
-                anyhow::bail!(
-                    "Insufficient data: got {} closing prices, need at least 20",
-                    closing_prices.len()
-                );
+            if cp.len() < 20 {
+                anyhow::bail!("Need >=20 prices, got {}", cp.len());
             }
+            let wret: Vec<f64> = cp.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
+            println!("  {} returns", wret.len());
 
-            let weekly_returns: Vec<f64> = closing_prices
-                .windows(2)
-                .map(|w| (w[1] / w[0]).ln())
-                .collect();
+            let cfg = SimulationConfig {
+                forecast_weeks: fy as usize * 52,
+                confidence_level: conf,
+                garch_order,
+                n_bootstrap: nboot,
+                seed: Some(42),
+            };
+            let res = tokio::task::spawn_blocking(move || run_gbm_garch(&wret, &cfg)).await??;
 
+            println!("\nResults:");
             println!(
-                "  {} weekly returns computed from {} price observations",
-                style(weekly_returns.len()).cyan().bold(),
-                closing_prices.len()
-            );
-
-            // ── Run SARIMA-GARCH simulation ───────────────────────────────
-            println!("\n{}", style("Running SARIMA-GARCH simulation...").bold());
-
-            let pb = ProgressBar::new(config.n_bootstrap as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} paths ({eta})",
-                    )?
-                    .progress_chars("#>-"),
-            );
-
-            let forecast_weeks = config.forecast_weeks;
-            let n_bootstrap = config.n_bootstrap;
-
-            // Run simulation (bootstrap progress is internal via rayon)
-            let result =
-                tokio::task::spawn_blocking(move || run_sarima_garch(&weekly_returns, &config))
-                    .await??;
-
-            pb.set_position(n_bootstrap as u64);
-            pb.finish_with_message(style("Simulation complete!").green().bold().to_string());
-
-            // ── Display Results ───────────────────────────────────────────
-            println!("\n{}", style("═".repeat(60)).dim());
-            println!(
-                "{} {} — SARIMA-GARCH Forecast ({} weeks)",
-                style("📊").bold(),
-                style(&ticker).cyan().bold(),
-                forecast_weeks
-            );
-            println!("{}", style("═".repeat(60)).dim());
-
-            println!(
-                "\n  {} Returns Forecast ({}% CI):",
-                style("→").green(),
-                (conf_level * 100.0) as usize
-            );
-            let n = result.returns_forecast.point.len();
-            for &w in &[52usize, 104, 156, 208, 260] {
-                if w <= n {
-                    let i = w - 1;
-                    let pt = result.returns_forecast.point[i] * 100.0;
-                    let lo = result.returns_forecast.lower[i] * 100.0;
-                    let hi = result.returns_forecast.upper[i] * 100.0;
-                    println!(
-                        "    Week {:3}: {:>6.2}%  [ {:>6.2}%, {:>6.2}% ]",
-                        w, pt, lo, hi
-                    );
-                }
-            }
-
-            println!(
-                "\n  {} Volatility Forecast ({}% CI):",
-                style("→").magenta(),
-                (conf_level * 100.0) as usize
-            );
-            for &w in &[52usize, 104, 156, 208, 260] {
-                if w <= n {
-                    let i = w - 1;
-                    let pt = result.volatility_forecast.point[i] * 100.0;
-                    let lo = result.volatility_forecast.lower[i] * 100.0;
-                    let hi = result.volatility_forecast.upper[i] * 100.0;
-                    println!(
-                        "    Week {:3}: {:>6.2}%  [ {:>6.2}%, {:>6.2}% ]",
-                        w, pt, lo, hi
-                    );
-                }
-            }
-
-            println!("\n  {} Summary Statistics:", style("→").yellow());
-            println!(
-                "    Mean Annual Return:  {}{}%",
-                if result.summary.mean_annual_return >= 0.0 {
-                    "+"
-                } else {
-                    ""
-                },
-                style(format!("{:.2}", result.summary.mean_annual_return * 100.0)).green()
+                "  Mean ann return: {:+.2}%",
+                res.summary.mean_annual_return * 100.0
             );
             println!(
-                "    Annual Volatility:   {}%",
-                style(format!("{:.2}", result.summary.annual_volatility * 100.0)).cyan()
+                "  Ann volatility:  {:.2}%",
+                res.summary.annual_volatility * 100.0
             );
+            println!("  Sharpe:          {:.3}", res.summary.sharpe_ratio);
             println!(
-                "    Sharpe Ratio:        {}",
-                style(format!("{:.3}", result.summary.sharpe_ratio)).cyan()
+                "  Max drawdown:    {:.2}%",
+                res.summary.max_drawdown * 100.0
             );
+            println!("  Drift (mu):      {:+.4}", res.mu_drift);
             println!(
-                "    Max Drawdown:        {}%  {}",
-                style(format!("{:.2}", result.summary.max_drawdown * 100.0)).red(),
-                style("(worst case)").dim()
+                "  GARCH:           ({},{})",
+                res.garch_order_selected.0, res.garch_order_selected.1
             );
-            println!(
-                "    Median Drawdown:     {}%",
-                style(format!("{:.2}", result.summary.median_drawdown * 100.0)).red()
-            );
-            println!(
-                "    Skewness:            {}",
-                style(format!("{:.4}", result.summary.skewness)).dim()
-            );
-            println!(
-                "    Excess Kurtosis:     {}",
-                style(format!("{:.4}", result.summary.kurtosis)).dim()
-            );
-            println!(
-                "    t-df Estimate:       {}",
-                style(format!("{:.2}", result.summary.t_df_estimate)).dim()
-            );
-            println!(
-                "    SARIMA Order:        {}",
-                style(&result.sarima_order_selected).cyan()
-            );
-            println!(
-                "    GARCH Order:         ({},{})",
-                result.garch_order_selected.0, result.garch_order_selected.1
-            );
-            println!("    Bootstrap Paths:     {}", style(n_bootstrap).cyan());
+            println!("  Paths:           {}", nboot);
 
-            // ── Distribution Percentiles ────────────────────────────────
-            let q_labels = [" 2.5%", "  25%", "  50%", "  75%", "97.5%"];
-            println!("\n  {} Distribution Percentiles:", style("→").yellow());
-            println!(
-                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
-                "Percentile:", q_labels[0], q_labels[1], q_labels[2], q_labels[3], q_labels[4]
-            );
-            println!(
-                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
-                "Annual Return",
-                format!("{:>+.2}%", result.summary.return_percentiles[0] * 100.0),
-                format!("{:>+.2}%", result.summary.return_percentiles[1] * 100.0),
-                format!("{:>+.2}%", result.summary.return_percentiles[2] * 100.0),
-                format!("{:>+.2}%", result.summary.return_percentiles[3] * 100.0),
-                format!("{:>+.2}%", result.summary.return_percentiles[4] * 100.0),
-            );
-            println!(
-                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
-                "Annual Vol",
-                format!("{:>6.2}%", result.summary.volatility_percentiles[0] * 100.0),
-                format!("{:>6.2}%", result.summary.volatility_percentiles[1] * 100.0),
-                format!("{:>6.2}%", result.summary.volatility_percentiles[2] * 100.0),
-                format!("{:>6.2}%", result.summary.volatility_percentiles[3] * 100.0),
-                format!("{:>6.2}%", result.summary.volatility_percentiles[4] * 100.0),
-            );
-            println!(
-                "    {:<14}{:>10}{:>10}{:>10}{:>10}{:>10}",
-                "Sharpe Ratio",
-                format!("{:>7.3}", result.summary.sharpe_percentiles[0]),
-                format!("{:>7.3}", result.summary.sharpe_percentiles[1]),
-                format!("{:>7.3}", result.summary.sharpe_percentiles[2]),
-                format!("{:>7.3}", result.summary.sharpe_percentiles[3]),
-                format!("{:>7.3}", result.summary.sharpe_percentiles[4]),
-            );
-
-            // ── SARIMA (0,0,0) info message ────────────────────────────
-            if result.sarima_order_selected.contains("(0,0,0)") {
-                println!(
-                    "\n  {} {}",
-                    style("!").yellow().bold(),
-                    style("SARIMA selected (0,0,0)(0,0,0) — no autocorrelation found in returns.")
-                        .dim()
-                );
-                println!(
-                    "    {}",
-                    style("This is normal for stock returns. GARCH still models volatility clustering.").dim()
-                );
-            }
-
-            // ── Generate HTML Dashboard ───────────────────────────────────
-            let html = generate_dashboard(&ticker, &result, &closing_prices)?;
-            std::fs::create_dir_all(output.parent().unwrap_or(Path::new(".")))?;
-            std::fs::write(&output, &html)?;
-
-            println!(
-                "\n  {} Dashboard saved to {}",
-                style("✓").green().bold(),
-                style(output.display()).cyan().underlined()
-            );
-            println!();
-        }
-
-        Commands::Gen { output } => {
-            // Load or create persistent config
-            let flux_cfg = load_flux_config().unwrap_or_else(|| {
-                println!(
-                    "\n  {} No configuration found. Starting setup wizard...",
-                    style("!").yellow().bold()
-                );
-                setup_wizard().expect("Setup wizard failed")
-            });
-
-            let output = output
-                .to_str()
-                .map(|s| s == "simulation.yaml")
-                .unwrap_or(false)
-                .then(|| flux_cfg.workspace.join("configs").join("simulation.yaml"))
-                .unwrap_or(output);
-
-            let spinner = ProgressBar::new_spinner();
-            spinner
-                .set_style(ProgressStyle::default_spinner().template("{spinner:.yellow} {msg}")?);
-            spinner.set_message(format!("Generating template at {}...", output.display()));
-
-            std::thread::sleep(std::time::Duration::from_millis(400));
-
-            if let Some(parent) = output.parent() {
+            let out = output.unwrap_or_else(|| flux.workspace.join("results/dashboard.html"));
+            if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&output, DEFAULT_TEMPLATE)?;
-            spinner.finish_with_message(
-                style("Template generated successfully!")
-                    .green()
-                    .to_string(),
-            );
-        }
-
-        Commands::Init => {
-            let existing = load_flux_config();
-            if existing.is_some() {
-                println!(
-                    "\n  {} Existing configuration found at {}",
-                    style("!").yellow().bold(),
-                    style(flux_config_path().display()).cyan().underlined()
-                );
-                print!("    {} Overwrite? [y/N]: ", style("Continue?").dim());
-                io::stdout().flush()?;
-                let mut confirm = String::new();
-                io::stdin().read_line(&mut confirm)?;
-                if !confirm.trim().eq_ignore_ascii_case("y") {
-                    println!("    {}", style("Aborted.").dim());
-                    return Ok(());
-                }
-            }
-            setup_wizard()?;
+            std::fs::write(&out, generate_dashboard(&ticker, &res, &cp)?)?;
+            println!("Dashboard: {}", out.display());
         }
     }
-
     Ok(())
 }
