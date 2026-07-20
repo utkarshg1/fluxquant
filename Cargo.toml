@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/fluxquant-core",
+    "crates/fluxquant-cli"
+]
+resolver = "2"
