@@ -18,23 +18,12 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use owo_colors::OwoColorize;
+use std::cmp::max;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use fluxquant::{GarchOrder, SimulationConfig, generate_dashboard, run_gbm_garch};
-
-const FLUXQUANT_BANNER: &str = r#"
-╔═══════════════════════════════════════════════════════════════╗
-║  ███████╗██╗████████╗██╗  ██╗     ██████╗ ███████╗███╗   ██╗║
-║  ██╔════╝██║╚══██╔══╝██║  ██║    ██╔═══██╗██╔════╝████╗  ██║║
-║  █████╗  ██║   ██║   ███████║    ██║   ██║███████╗██╔██╗ ██║║
-║  ██╔══╝  ██║   ██║   ██╔══██║    ██║   ██║╚════██║██║╚██╗██║║
-║  ██║     ██║   ██║   ██║  ██║    ╚██████╔╝███████║██║ ╚████║║
-║  ╚═╝     ╚═╝   ╚═╝   ╚═╝  ╚═╝     ╚═════╝ ╚══════╝╚═╝  ╚═══╝║
-║                                                               ║
-║            GBM-GARCH Simulation Engine                        ║
-╚═══════════════════════════════════════════════════════════════╝
-"#;
 
 const DEFAULT_TEMPLATE: &str = r#"# fluxquant GBM-GARCH simulation configuration
 simulation:
@@ -203,9 +192,62 @@ enum Commands {
     Init,
 }
 
+fn print_corrected_cyan_banner() {
+    let ascii_art = vec![
+        "██████╗ ██╗     ██╗   ██╗██╗  ██╗ ██████╗  ██╗   ██╗ █████╗ ███╗   ██╗████████╗",
+        "██╔═══╝ ██║     ██║   ██║╚██╗██╔╝██╔═══██╗ ██║   ██║██╔══██╗████╗  ██║╚══██╔══╝",
+        "█████╗  ██║     ██║   ██║ ╚███╔╝ ██║   ██║ ██║   ██║███████║██╔██╗ ██║   ██║   ",
+        "██╔══╝  ██║     ██║   ██║ ██╔██╗ ██║▄▄ ██║ ██║   ██║██╔══██║██║╚██╗██║   ██║   ",
+        "██║     ███████╗╚██████╔╝██╔╝ ██╗╚██████╔╝ ╚██████╔╝██║  ██║██║ ╚████║   ██║   ",
+        "╚═╝     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚════▀▀   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ",
+    ];
+
+    let subtitle = "Created by Utkarsh Gaikwad";
+
+    let banner_width = ascii_art
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_width = max(banner_width, subtitle.chars().count());
+
+    let top_border = format!("╔{}╗", "═".repeat(max_width + 4));
+    let divider = format!("╠{}╣", "═".repeat(max_width + 4));
+    let bot_border = format!("╚{}╝", "═".repeat(max_width + 4));
+
+    println!("{}", top_border.cyan().bold());
+
+    for line in &ascii_art {
+        let current_len = line.chars().count();
+        let padding = max_width - current_len;
+        println!(
+            "{}  {}{}  {}",
+            "║".cyan().bold(),
+            line.cyan().bold(),
+            " ".repeat(padding),
+            "║".cyan().bold()
+        );
+    }
+
+    println!("{}", divider.cyan().bold());
+
+    let sub_len = subtitle.chars().count();
+    let sub_padding = max_width - sub_len;
+    println!(
+        "{}  {}{}  {}",
+        "║".cyan().bold(),
+        subtitle.cyan().bold(),
+        " ".repeat(sub_padding),
+        "║".cyan().bold()
+    );
+
+    println!("{}", bot_border.cyan().bold());
+    println!();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    print!("{FLUXQUANT_BANNER}");
+    print_corrected_cyan_banner();
 
     let cli = Cli::parse();
     match cli.command {
