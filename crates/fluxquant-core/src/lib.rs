@@ -25,6 +25,7 @@
 //!     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
 //!     n_bootstrap: 10_000,
 //!     seed: Some(42),
+//!     var_level: 0.05,
 //! };
 //!
 //! // With real weekly log-returns:
@@ -89,6 +90,7 @@ pub enum GarchOrder {
 ///     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
 ///     n_bootstrap: 10_000,
 ///     seed: Some(42),
+///     var_level: 0.05,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -103,6 +105,8 @@ pub struct SimulationConfig {
     pub n_bootstrap: usize,
     /// Random seed for reproducibility (None = random).
     pub seed: Option<u64>,
+    /// VaR/CVaR tail probability level (e.g. 0.05 for 5%).
+    pub var_level: f64,
 }
 
 // ─── Results ──────────────────────────────────────────────────────────────────
@@ -124,6 +128,12 @@ pub struct SummaryStats {
     pub skewness: f64,
     /// Return distribution excess kurtosis.
     pub kurtosis: f64,
+    /// Value at Risk at var_level (negative = loss).
+    pub var: f64,
+    /// Conditional Value at Risk (Expected Shortfall) at var_level.
+    pub cvar: f64,
+    /// VaR/CVaR tail probability level used.
+    pub var_level: f64,
     /// Estimated t-distribution degrees of freedom.
     pub t_df_estimate: f64,
     /// Annual return percentiles: [2.5%, 25%, 50%, 75%, 97.5%]
@@ -137,7 +147,7 @@ pub struct SummaryStats {
 /// Full result of a GBM-GARCH simulation.
 #[derive(Debug, Clone)]
 pub struct SimulationResult {
-    /// Median price path (normalized to start at 1.0).
+    /// Median price path (scaled to actual prices).
     pub price_median: Vec<f64>,
     /// Lower confidence bound for price path.
     pub price_lower: Vec<f64>,
@@ -149,7 +159,7 @@ pub struct SimulationResult {
     pub vol_lower: Vec<f64>,
     /// GARCH volatility forecast upper CI.
     pub vol_upper: Vec<f64>,
-    /// Complete bootstrap price paths (one Vec per path).
+    /// Complete bootstrap price paths (scaled to actual prices).
     pub bootstrap_paths: Vec<Vec<f64>>,
     /// Summary statistics.
     pub summary: SummaryStats,
@@ -157,6 +167,10 @@ pub struct SimulationResult {
     pub garch_order_selected: (usize, usize),
     /// Estimated drift (mean log-return).
     pub mu_drift: f64,
+    /// Last known historical price used to scale forecast.
+    pub last_price: f64,
+    /// Confidence level used for intervals.
+    pub confidence_level: f64,
 }
 
 // ─── GARCH Optimization ───────────────────────────────────────────────────────
@@ -282,6 +296,7 @@ pub fn optimize_garch(
 pub fn run_gbm_garch(
     weekly_returns: &[f64],
     config: &SimulationConfig,
+    last_price: f64,
 ) -> Result<SimulationResult, FluxError> {
     if weekly_returns.len() < 20 {
         return Err(FluxError::SimulationError(
@@ -354,7 +369,7 @@ pub fn run_gbm_garch(
         weekly_returns.to_vec()
     };
 
-    let bootstrap_paths = run_gbm_bootstrap(
+    let norm_bootstrap_paths = run_gbm_bootstrap(
         &standardized_returns,
         mu_drift,
         &vol_forecast,
@@ -363,10 +378,19 @@ pub fn run_gbm_garch(
         config.seed,
     );
 
-    let (price_median, price_lower, price_upper) =
-        compute_price_percentiles(&bootstrap_paths, config.confidence_level);
+    let (norm_price_median, norm_price_lower, norm_price_upper) =
+        compute_price_percentiles(&norm_bootstrap_paths, config.confidence_level);
 
-    let summary = compute_summary(&bootstrap_paths, weekly_returns);
+    let summary = compute_summary(&norm_bootstrap_paths, weekly_returns, config.var_level);
+
+    // Scale bootstrap paths to actual prices
+    let bootstrap_paths: Vec<Vec<f64>> = norm_bootstrap_paths
+        .iter()
+        .map(|path| path.iter().map(|p| p * last_price).collect())
+        .collect();
+    let price_median: Vec<f64> = norm_price_median.iter().map(|p| p * last_price).collect();
+    let price_lower: Vec<f64> = norm_price_lower.iter().map(|p| p * last_price).collect();
+    let price_upper: Vec<f64> = norm_price_upper.iter().map(|p| p * last_price).collect();
 
     Ok(SimulationResult {
         price_median,
@@ -379,6 +403,8 @@ pub fn run_gbm_garch(
         summary,
         garch_order_selected: (selected_p, selected_q),
         mu_drift,
+        last_price,
+        confidence_level: config.confidence_level,
     })
 }
 
@@ -479,7 +505,11 @@ fn compute_percentiles(sorted_data: &mut [f64], quantiles: &[f64]) -> Vec<f64> {
 }
 
 /// Compute summary statistics from bootstrap paths and historical returns.
-fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummaryStats {
+fn compute_summary(
+    paths: &[Vec<f64>],
+    _historical_returns: &[f64],
+    var_level: f64,
+) -> SummaryStats {
     let n = paths.len() as f64;
     let quantiles = [0.025, 0.25, 0.50, 0.75, 0.975];
 
@@ -574,6 +604,23 @@ fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummarySt
         0.0
     };
 
+    // VaR and CVaR from terminal simple returns
+    let terminal_simple: Vec<f64> = paths
+        .iter()
+        .filter_map(|p| p.last().copied())
+        .map(|terminal| terminal - 1.0)
+        .collect();
+    let mut sorted_simple = terminal_simple.clone();
+    sorted_simple.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let var_idx = (var_level * sorted_simple.len() as f64).floor() as usize;
+    let var = sorted_simple[var_idx.min(sorted_simple.len() - 1)];
+    let tail: Vec<f64> = sorted_simple.iter().take(var_idx + 1).copied().collect();
+    let cvar = if tail.is_empty() {
+        var
+    } else {
+        tail.iter().sum::<f64>() / tail.len() as f64
+    };
+
     // Estimate t-distribution degrees of freedom from kurtosis
     let t_df_estimate = if kurtosis > 0.1 {
         (6.0 / kurtosis) + 4.0
@@ -588,8 +635,11 @@ fn compute_summary(paths: &[Vec<f64>], _historical_returns: &[f64]) -> SummarySt
         max_drawdown,
         median_drawdown,
         skewness,
-        t_df_estimate,
         kurtosis,
+        var,
+        cvar,
+        var_level,
+        t_df_estimate,
         return_percentiles,
         volatility_percentiles,
         sharpe_percentiles,
@@ -660,7 +710,7 @@ pub fn generate_dashboard(
     let mut all_labels = hist_labels.clone();
     all_labels.extend(forecast_labels.iter().cloned());
 
-    let level_pct = 95_usize;
+    let level_pct = (result.confidence_level * 100.0).round() as usize;
     let gp = result.garch_order_selected.0;
     let gq = result.garch_order_selected.1;
 
@@ -697,6 +747,9 @@ pub fn generate_dashboard(
     let kurt_val = format!("{:.4}", result.summary.kurtosis);
     let t_df_val = format!("{:.2}", result.summary.t_df_estimate);
     let mu_drift_val = format!("{:+.4}", result.mu_drift);
+    let var_pct = format!("{:.2}", result.summary.var * 100.0);
+    let cvar_pct = format!("{:.2}", result.summary.cvar * 100.0);
+    let var_level_pct = (result.summary.var_level * 100.0).round() as usize;
     let rp: Vec<String> = result
         .summary
         .return_percentiles
@@ -881,6 +934,8 @@ pub fn generate_dashboard(
       <tr><td>Median Drawdown</td><td class="value negative">{md_pct}%</td></tr>
       <tr><td>Skewness</td><td class="value {skew_cls}">{skew_val}</td></tr>
       <tr><td>Excess Kurtosis</td><td class="value {kurt_cls}">{kurt_val}</td></tr>
+      <tr><td>VaR ({var_level_pct}%)</td><td class="value negative">{var_pct}%</td></tr>
+      <tr><td>CVaR ({var_level_pct}%)</td><td class="value negative">{cvar_pct}%</td></tr>
       <tr><td>t-df Estimate</td><td class="value">{t_df_val}</td></tr>
       <tr><td>GARCH Order</td><td class="value">({gp},{gq})</td></tr>
       <tr><td>Drift (μ)</td><td class="value">{mu_drift_val}</td></tr>
@@ -943,11 +998,12 @@ function baseOpts() {{
 new Chart(document.getElementById('priceChart'), {{
   type: 'line',
   data: {{
-    labels: DATA.forecastLabels,
+    labels: DATA.allLabels,
     datasets: [
-      {{ label: 'Upper CI', data: DATA.priceUpper, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: '+1', pointRadius: 0 }},
-      {{ label: 'Median Price', data: DATA.priceMedian, borderColor: '#00d4aa', borderWidth: 2, backgroundColor: 'transparent', pointRadius: 0, tension: 0.3 }},
-      {{ label: 'Lower CI', data: DATA.priceLower, borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: false, pointRadius: 0 }}
+      {{ label: 'Historical', data: [...DATA.historicalPrices, ...Array(DATA.priceMedian.length).fill(null)], borderColor: '#666', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: 'Upper CI', data: [...Array(DATA.historicalPrices.length).fill(null), ...DATA.priceUpper], borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: '+2', pointRadius: 0 }},
+      {{ label: 'Median', data: [...Array(DATA.historicalPrices.length).fill(null), ...DATA.priceMedian], borderColor: '#00d4aa', borderWidth: 2, backgroundColor: 'transparent', pointRadius: 0, tension: 0.3, fill: false }},
+      {{ label: 'Lower CI', data: [...Array(DATA.historicalPrices.length).fill(null), ...DATA.priceLower], borderColor: 'transparent', backgroundColor: 'rgba(0,212,170,0.15)', fill: '-2', pointRadius: 0 }}
     ]
   }},
   options: baseOpts()
@@ -1029,6 +1085,9 @@ new Chart(document.getElementById('histChart'), {{
         sharpe_cls = sharpe_cls,
         skew_cls = skew_cls,
         kurt_cls = kurt_cls,
+        var_pct = var_pct,
+        cvar_pct = cvar_pct,
+        var_level_pct = var_level_pct,
         rp0 = rp[0],
         rp1 = rp[1],
         rp2 = rp[2],
@@ -1361,13 +1420,13 @@ mod tests {
     #[test]
     fn dashboard_generation() {
         let result = SimulationResult {
-            price_median: vec![1.0, 1.01, 1.02],
-            price_lower: vec![0.98, 0.97, 0.96],
-            price_upper: vec![1.02, 1.04, 1.06],
+            price_median: vec![100.0, 101.0, 102.0],
+            price_lower: vec![98.0, 97.0, 96.0],
+            price_upper: vec![102.0, 104.0, 106.0],
             vol_forecast: vec![0.02, 0.02, 0.02],
             vol_lower: vec![0.015, 0.015, 0.015],
             vol_upper: vec![0.025, 0.025, 0.025],
-            bootstrap_paths: vec![vec![1.0, 1.01, 1.02], vec![1.0, 0.99, 1.0]],
+            bootstrap_paths: vec![vec![100.0, 101.0, 102.0], vec![100.0, 99.0, 100.0]],
             summary: SummaryStats {
                 mean_annual_return: 0.08,
                 annual_volatility: 0.18,
@@ -1376,6 +1435,9 @@ mod tests {
                 median_drawdown: -0.06,
                 skewness: -0.3,
                 kurtosis: 0.5,
+                var: -0.15,
+                cvar: -0.20,
+                var_level: 0.05,
                 t_df_estimate: 16.0,
                 return_percentiles: [-0.15, -0.02, 0.06, 0.12, 0.29],
                 volatility_percentiles: [0.10, 0.14, 0.17, 0.21, 0.28],
@@ -1383,6 +1445,8 @@ mod tests {
             },
             garch_order_selected: (1, 1),
             mu_drift: 0.001,
+            last_price: 100.0,
+            confidence_level: 0.95,
         };
         let html = generate_dashboard("AAPL", &result, &[100.0, 101.0, 102.0]).unwrap();
         assert!(html.contains("AAPL"));
@@ -1393,5 +1457,7 @@ mod tests {
         assert!(html.contains("histChart"));
         assert!(html.contains("Summary Statistics"));
         assert!(html.contains("Distribution Percentiles"));
+        assert!(html.contains("VaR"));
+        assert!(html.contains("CVaR"));
     }
 }

@@ -32,6 +32,7 @@ simulation:
   history_years: 3
   confidence_level: 0.95
   n_bootstrap: 10000
+  var_level: 0.05
 
 garch:
   mode: "optimize"
@@ -122,6 +123,7 @@ fn setup() -> Result<FluxConfig> {
 #[derive(serde::Deserialize)]
 struct YSim {
     ticker: Option<String>,
+    var_level: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -178,6 +180,8 @@ enum Commands {
         garch_p: Option<usize>,
         /// Fixed GARCH q order (requires --garch-p).
         garch_q: Option<usize>,
+        /// VaR/CVaR tail probability (default: 0.05).
+        var_level: Option<f64>,
         /// Output path for the HTML dashboard.
         output: Option<PathBuf>,
         /// Path to a YAML configuration file.
@@ -245,6 +249,60 @@ fn print_corrected_cyan_banner() {
     println!();
 }
 
+fn print_settings_box(
+    ticker: &str,
+    fy: u32,
+    hy: u32,
+    conf: f64,
+    nboot: usize,
+    garch_order: &GarchOrder,
+    var_level: f64,
+) {
+    let garch_str = match garch_order {
+        GarchOrder::Auto { max_p, max_q } => format!("Auto (max {max_p},{max_q})"),
+        GarchOrder::Manual { p, q } => format!("Fixed ({p},{q})"),
+    };
+    let level_pct = (conf * 100.0).round() as usize;
+    let var_pct = (var_level * 100.0).round() as usize;
+    let w = 40;
+
+    println!("{}", format!("┌{}┐", "─".repeat(w)).cyan().bold());
+    println!(
+        "{} {}{} {}",
+        "║".cyan().bold(),
+        "Simulation Settings".cyan().bold(),
+        " ".repeat(w - 21),
+        "║".cyan().bold()
+    );
+    println!("{}", format!("├{}┤", "─".repeat(w)).cyan().bold());
+
+    let rows = [
+        ("Ticker", ticker.to_string()),
+        ("Forecast", format!("{fy} years")),
+        ("History", format!("{hy} years")),
+        ("Confidence", format!("{level_pct}%")),
+        ("Bootstrap", format!("{nboot} paths")),
+        ("GARCH", garch_str),
+        ("VaR Level", format!("{var_pct}%")),
+    ];
+
+    for (label, value) in &rows {
+        let label_w = 14;
+        let val_w = w - label_w - 3;
+        let padding = val_w.saturating_sub(value.len());
+        println!(
+            "{}  {:<label_w$}{}{}{}",
+            "║".cyan().bold(),
+            label.white().bold(),
+            value,
+            " ".repeat(padding),
+            "║".cyan().bold()
+        );
+    }
+
+    println!("{}", format!("└{}┘", "─".repeat(w)).cyan().bold());
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     print_corrected_cyan_banner();
@@ -280,6 +338,7 @@ async fn main() -> Result<()> {
             paths,
             garch_p,
             garch_q,
+            var_level: var_level_flag,
             output,
             config,
         } => {
@@ -288,13 +347,14 @@ async fn main() -> Result<()> {
                 std::process::exit(1)
             });
 
-            let fy = years.unwrap_or(5);
-            let hy = history_years.unwrap_or(3);
-            let conf = confidence.unwrap_or(0.95);
-            let nboot = paths.unwrap_or(10000);
+            let mut fy = years.unwrap_or(5);
+            let mut hy = history_years.unwrap_or(3);
+            let mut conf = confidence.unwrap_or(0.95);
+            let mut nboot = paths.unwrap_or(10000);
+            let mut var_level = var_level_flag.unwrap_or(0.05);
 
             let mut garch_order = GarchOrder::Auto { max_p: 3, max_q: 3 };
-            let mut ticker = ticker.unwrap_or(flux.default_ticker.clone());
+            let mut sim_ticker = ticker.clone().unwrap_or(flux.default_ticker.clone());
 
             if let Some(ref cp) = config {
                 let raw = std::fs::read_to_string(cp)?;
@@ -311,10 +371,13 @@ async fn main() -> Result<()> {
                         },
                     };
                 }
-                if let Some(ref s) = parsed.simulation
-                    && let Some(ref t) = s.ticker
-                {
-                    ticker = t.clone();
+                if let Some(ref s) = parsed.simulation {
+                    if let Some(ref t) = s.ticker {
+                        sim_ticker = t.clone();
+                    }
+                    if let Some(v) = s.var_level {
+                        var_level = v;
+                    }
                 }
             }
 
@@ -325,10 +388,103 @@ async fn main() -> Result<()> {
                 };
             }
 
-            println!("Fetching {ticker}...");
+            // Show settings and confirm
+            print_settings_box(&sim_ticker, fy, hy, conf, nboot, &garch_order, var_level);
+            print!("Run with these settings? [Y/n]: ");
+            io::stdout().flush()?;
+            let mut confirm = String::new();
+            io::stdin().read_line(&mut confirm)?;
+
+            if confirm.trim().eq_ignore_ascii_case("n") {
+                // Interactive mode
+                println!();
+
+                print!("Ticker [{}]: ", sim_ticker);
+                io::stdout().flush()?;
+                let input = prompt(&sim_ticker)?;
+                sim_ticker = input;
+
+                print!("Forecast years [{fy}]: ");
+                io::stdout().flush()?;
+                let input = prompt(&fy.to_string())?;
+                if let Ok(v) = input.parse::<u32>() {
+                    fy = v;
+                }
+
+                print!("History years [{hy}]: ");
+                io::stdout().flush()?;
+                let input = prompt(&hy.to_string())?;
+                if let Ok(v) = input.parse::<u32>() {
+                    hy = v;
+                }
+
+                print!("Confidence level [{conf}]: ");
+                io::stdout().flush()?;
+                let input = prompt(&conf.to_string())?;
+                if let Ok(v) = input.parse::<f64>() {
+                    conf = v;
+                }
+
+                print!("Bootstrap paths [{nboot}]: ");
+                io::stdout().flush()?;
+                let input = prompt(&nboot.to_string())?;
+                if let Ok(v) = input.parse::<usize>() {
+                    nboot = v;
+                }
+
+                let default_garch = match &garch_order {
+                    GarchOrder::Auto { .. } => "auto",
+                    GarchOrder::Manual { .. } => "fixed",
+                };
+                print!("GARCH mode (auto/fixed) [{default_garch}]: ");
+                io::stdout().flush()?;
+                let input = prompt(default_garch)?;
+                if input.eq_ignore_ascii_case("fixed") {
+                    print!("GARCH p [1]: ");
+                    io::stdout().flush()?;
+                    let input = prompt("1")?;
+                    let p: usize = input.parse().unwrap_or(1);
+                    print!("GARCH q [1]: ");
+                    io::stdout().flush()?;
+                    let input = prompt("1")?;
+                    let q: usize = input.parse().unwrap_or(1);
+                    garch_order = GarchOrder::Manual { p, q };
+                } else {
+                    print!("Max GARCH p [3]: ");
+                    io::stdout().flush()?;
+                    let input = prompt("3")?;
+                    let max_p: usize = input.parse().unwrap_or(3);
+                    print!("Max GARCH q [3]: ");
+                    io::stdout().flush()?;
+                    let input = prompt("3")?;
+                    let max_q: usize = input.parse().unwrap_or(3);
+                    garch_order = GarchOrder::Auto { max_p, max_q };
+                }
+
+                print!("VaR level [{var_level}]: ");
+                io::stdout().flush()?;
+                let input = prompt(&var_level.to_string())?;
+                if let Ok(v) = input.parse::<f64>() {
+                    var_level = v;
+                }
+
+                println!();
+                print_settings_box(&sim_ticker, fy, hy, conf, nboot, &garch_order, var_level);
+                print!("Confirm? [Y/n]: ");
+                io::stdout().flush()?;
+                let mut final_confirm = String::new();
+                io::stdin().read_line(&mut final_confirm)?;
+                if final_confirm.trim().eq_ignore_ascii_case("n") {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+            }
+
+            println!();
+            println!("{}", "Fetching data...".cyan());
 
             let client = yfinance_rs::YfClient::default();
-            let yf = yfinance_rs::Ticker::new(&client, &ticker);
+            let yf = yfinance_rs::Ticker::new(&client, &sim_ticker);
             let range = match hy {
                 1 => yfinance_rs::Range::Y1,
                 2 => yfinance_rs::Range::Y2,
@@ -347,7 +503,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("Need >=20 prices, got {}", cp.len());
             }
             let wret: Vec<f64> = cp.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
-            println!("  {} returns", wret.len());
+            println!(
+                "  {} weekly returns fetched",
+                wret.len().to_string().green()
+            );
 
             let cfg = SimulationConfig {
                 forecast_weeks: fy as usize * 52,
@@ -355,36 +514,85 @@ async fn main() -> Result<()> {
                 garch_order,
                 n_bootstrap: nboot,
                 seed: Some(42),
+                var_level,
             };
-            let res = tokio::task::spawn_blocking(move || run_gbm_garch(&wret, &cfg)).await??;
+            let last_price = cp.last().copied().unwrap_or(1.0);
+            let res = tokio::task::spawn_blocking(move || run_gbm_garch(&wret, &cfg, last_price))
+                .await??;
 
-            println!("\nResults:");
+            let level_pct = (conf * 100.0).round() as usize;
+            let var_level_pct = (var_level * 100.0).round() as usize;
+
+            println!();
+            println!("{}", "── Simulation Results ──".cyan().bold());
+            println!();
+
+            let ret = res.summary.mean_annual_return * 100.0;
+            let ret_str = format!("{ret:+.2}%");
+            if ret >= 0.0 {
+                println!("  Mean ann return:  {}", ret_str.green());
+            } else {
+                println!("  Mean ann return:  {}", ret_str.red());
+            }
+
             println!(
-                "  Mean ann return: {:+.2}%",
-                res.summary.mean_annual_return * 100.0
+                "  Ann volatility:   {}",
+                format!("{:.2}%", res.summary.annual_volatility * 100.0).yellow()
             );
+
+            let sharpe = res.summary.sharpe_ratio;
+            let sharpe_str = format!("{sharpe:.3}");
+            if sharpe > 1.0 {
+                println!("  Sharpe:           {}", sharpe_str.green());
+            } else if sharpe >= 0.0 {
+                println!("  Sharpe:           {}", sharpe_str.yellow());
+            } else {
+                println!("  Sharpe:           {}", sharpe_str.red());
+            }
+
             println!(
-                "  Ann volatility:  {:.2}%",
-                res.summary.annual_volatility * 100.0
+                "  Max drawdown:     {}",
+                format!("{:.2}%", res.summary.max_drawdown * 100.0).red()
             );
-            println!("  Sharpe:          {:.3}", res.summary.sharpe_ratio);
+            println!("  Drift (mu):       {:+.4}", res.mu_drift);
             println!(
-                "  Max drawdown:    {:.2}%",
-                res.summary.max_drawdown * 100.0
-            );
-            println!("  Drift (mu):      {:+.4}", res.mu_drift);
-            println!(
-                "  GARCH:           ({},{})",
+                "  GARCH:            ({},{})",
                 res.garch_order_selected.0, res.garch_order_selected.1
             );
-            println!("  Paths:           {}", nboot);
+            println!("  Bootstrap paths:  {nboot}");
+
+            println!();
+            println!(
+                "  VaR  ({var_level_pct}%):     {}",
+                format!("{:.2}%", res.summary.var * 100.0).red()
+            );
+            println!(
+                "  CVaR ({var_level_pct}%):     {}",
+                format!("{:.2}%", res.summary.cvar * 100.0).red()
+            );
+
+            let target = *res.price_median.last().unwrap_or(&0.0);
+            let ci_lo = *res.price_lower.last().unwrap_or(&0.0);
+            let ci_hi = *res.price_upper.last().unwrap_or(&0.0);
+
+            println!();
+            println!(
+                "  Target price:     {} ({level_pct}% CI: {} to {})",
+                format!("{target:.2}").white().bold(),
+                format!("{ci_lo:.2}").white().bold(),
+                format!("{ci_hi:.2}").white().bold()
+            );
 
             let out = output.unwrap_or_else(|| flux.workspace.join("results/dashboard.html"));
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&out, generate_dashboard(&ticker, &res, &cp)?)?;
-            println!("Dashboard: {}", out.display());
+            std::fs::write(&out, generate_dashboard(&sim_ticker, &res, &cp)?)?;
+            println!();
+            println!(
+                "  Dashboard:        {}",
+                format!("{}", out.display()).green()
+            );
         }
     }
     Ok(())

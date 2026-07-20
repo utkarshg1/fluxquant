@@ -10,7 +10,7 @@ Fluxquant treats market data as a continuous, streaming flow — emphasizing spe
 - **Auto GARCH Order Selection** — grid search over `(p,q)` combinations optimized by BIC
 - **Parallel Bootstrap** — rayon-powered Monte Carlo path simulation
 - **Interactive HTML Dashboard** — self-contained output with Chart.js visualizations
-- **Risk Analytics** — Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation
+- **Risk Analytics** — VaR, CVaR, Sharpe ratio, drawdown, skewness, kurtosis, t-distribution estimation
 - **Legacy API** — builder-pattern `SimulationEngine` for quick volatility fitting
 - **YAML Configuration** — declarative simulation configs with CLI template generation
 
@@ -39,7 +39,7 @@ Or add the core library to your project:
 
 ```toml
 [dependencies]
-fluxquant = "1.4.0"
+fluxquant = "1.5.0"
 ```
 
 ## Usage
@@ -53,17 +53,17 @@ fluxquant-cli init
 # Generate a default simulation YAML template
 fluxquant-cli gen
 
-# Run a GBM-GARCH simulation
+# Run a GBM-GARCH simulation (shows settings, asks for confirmation)
 fluxquant-cli run --ticker AAPL --years 5
 
-# Specify GARCH order manually
-fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1
+# Specify GARCH order and VaR tail level
+fluxquant-cli run --ticker SPY --years 3 --garch-p 1 --garch-q 1 --var-level 0.01
 
 # Use a YAML config file
 fluxquant-cli run --config simulation.yaml
 ```
 
-The CLI prints a branded ASCII art banner on startup and outputs an interactive HTML dashboard with charts and statistics.
+The CLI prints a branded ASCII art banner on startup, shows a colored settings summary with confirmation prompt, and outputs an interactive HTML dashboard with charts and statistics. Running without flags enters an interactive mode where each parameter is prompted individually.
 
 ### Library
 
@@ -76,26 +76,25 @@ let config = SimulationConfig {
     garch_order: GarchOrder::Auto { max_p: 3, max_q: 3 },
     n_bootstrap: 10_000,
     seed: Some(42),
+    var_level: 0.05,
 };
 
-let result = run_gbm_garch(&weekly_log_returns, &config)?;
+let last_price = 150.0; // last known market price
+let result = run_gbm_garch(&weekly_log_returns, &config, last_price)?;
 
 println!("Mean annual return: {:+.2}%", result.summary.mean_annual_return * 100.0);
 println!("Annual volatility:  {:.2}%", result.summary.annual_volatility * 100.0);
 println!("Sharpe ratio:       {:.3}", result.summary.sharpe_ratio);
 println!("Max drawdown:       {:.2}% (worst case)", result.summary.max_drawdown * 100.0);
 println!("Median drawdown:    {:.2}%", result.summary.median_drawdown * 100.0);
+println!("VaR  (5%):          {:+.2}%", result.summary.var * 100.0);
+println!("CVaR (5%):          {:+.2}%", result.summary.cvar * 100.0);
+println!("Target price:       {:.2}", result.price_median.last().unwrap());
 println!(
     "Return percentiles: 2.5%: {:+.2}%, 50%: {:+.2}%, 97.5%: {:+.2}%",
     result.summary.return_percentiles[0] * 100.0,
     result.summary.return_percentiles[2] * 100.0,
     result.summary.return_percentiles[4] * 100.0
-);
-println!(
-    "Volatility percentiles: 2.5%: {:.2}%, 50%: {:.2}%, 97.5%: {:.2}%",
-    result.summary.volatility_percentiles[0] * 100.0,
-    result.summary.volatility_percentiles[2] * 100.0,
-    result.summary.volatility_percentiles[4] * 100.0
 );
 ```
 
@@ -117,13 +116,13 @@ The HTML dashboard includes four interactive Chart.js visualizations:
 
 | Chart | Description |
 |-------|-------------|
-| **Price Forecast** | Median price path with confidence interval band |
+| **Price Forecast** | Historical prices with median forecast and CI band |
 | **Volatility Forecast** | GARCH volatility point estimates with CI band |
 | **Bootstrap Fan Chart** | Up to 50 sampled Monte Carlo paths |
 | **Terminal Price Distribution** | Histogram of final prices across all bootstrap paths |
 
 Plus two data tables:
-- **Summary Statistics** — mean return, annual volatility, Sharpe ratio, max/median drawdown, skewness, kurtosis, t-df estimate, GARCH order, drift parameter
+- **Summary Statistics** — mean return, annual volatility, Sharpe ratio, max/median drawdown, skewness, kurtosis, VaR, CVaR, t-df estimate, GARCH order, drift parameter
 - **Distribution Percentiles** — return, volatility, and Sharpe ratio at 2.5%, 25%, 50%, 75%, 97.5%
 
 ## Pipeline
